@@ -1,0 +1,25 @@
+[package]
+name = "hc-tui"
+version = "0.1.0"
+edition = "2024"
+description = "Unofficial terminal UI for herdr-core (hc): sidebar, herdr-style keys, predictive echo"
+license = "Apache-2.0"
+repository = "https://github.com/BTL00/hc-tui"
+readme = "README.md"
+keywords = ["herdr", "terminal", "tui", "agents", "multiplexer"]
+categories = ["command-line-utilities"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[dependencies]
+anyhow = "1.0.104"
+ratatui = "0.30.2"
+serde_json = "1.0.154"
+unicode-width = "0.2.3"
+vt100 = "0.18.1"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading", "Win32_Storage_FileSystem", "Win32_System_IO"] }

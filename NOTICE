@@ -1,0 +1,16 @@
+hc-tui
+Copyright 2026 the hc-tui authors
+
+This product is an unofficial client for herdr-core and is not affiliated
+with or endorsed by the herdr project.
+
+It includes code adapted from the following Apache-2.0 licensed projects,
+Copyright the herdr authors (https://github.com/herdrdev):
+
+- herdr-core (https://github.com/herdrdev/herdr-core)
+  * Windows console raw input (src/term_io.rs), from crates/herdr-core/src/platform/windows.rs
+  * framed wire format (src/hc.rs), from crates/herdr-core/src/wire.rs
+- herdr-app (https://github.com/herdrdev/herdr-app)
+  * the shared layout document schema (src/layout.rs), from src/mirror.rs and src/layout.rs
+- herdr (https://github.com/herdrdev/herdr)
+  * default keybindings (src/keys.rs), from docs/next/website/src/content/docs/keyboard.mdx

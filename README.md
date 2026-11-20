@@ -1,0 +1,100 @@
+# hc-tui
+
+An unofficial terminal UI for [herdr-core](https://github.com/herdrdev/herdr-core) (`hc`): the sidebar,
+splits and keys of the classic herdr TUI, on top of the new hc runtime, across every machine `hc` knows,
+with predictive local echo for laggy links.
+
+> Not affiliated with the herdr project. Built because the herdr 0.9 terminal UI and the new
+> herdr-core runtime don't talk to each other, and I wanted both: herdr's keyboard workflow in a
+> terminal, and sessions I can also open from the Herdr desktop and iPhone apps.
+
+```
+┌ hc-tui ──────────────────────┐┌──────────────────────────────┬─────────────────────┐
+│◆ laptop                      ││ $ cargo test                 │ ● claude            │
+│ api                          ││ running 9 tests              │ > review the diff   │
+│ ▌● review ⊞2 claude          ││ test result: ok              │                     │
+│  ○ docs claude               │├──────────────────────────────┴─────────────────────┤
+│◆ vps connected               ││ PS C:\Users\me\app> npm run dev                    │
+│ shop                         ││                                                    │
+│  ▲ checkout claude           ││                                                    │
+└──────────────────────────────┘└────────────────────────────────────────────────────┘
+ PREFIX  api › review  t5 ~/src/api                                    echo⚡ ctrl+b ? help
+```
+
+## What it does
+
+- **Shared layout.** Workspaces, tabs and splits are read from and written to the same layout document the
+  Herdr desktop app keeps in each machine's core (`herdr-app`). Split a pane in hc-tui and it is split in
+  the desktop and phone apps too; rearrange in the app and hc-tui follows. Unknown fields are preserved,
+  writes use the core's version check.
+- **herdr keys.** Prefix `ctrl+b`, then the herdr defaults: `c` new tab, `v` / `-` split, `h/j/k/l` move,
+  `H/J/K/L` swap, `z` zoom, `x` close, `r` resize, `n/p/1..9` tabs, `N/W/D` workspaces, `w` navigate,
+  `g` goto, `b` sidebar, `q` detach. `ctrl+b ?` lists them all.
+- **Every machine.** Machines added with `hc machine add` show up in the sidebar with their own workspaces;
+  their terminals are attached through your local core.
+- **Agent status.** Each tab shows its busiest terminal: `▲` blocked, `●` working, `✓` done, `○` idle.
+  The goto picker (`ctrl+b g`) searches everything and filters with `b w i d a`, like herdr's.
+- **Predictive echo.** Printable keys show up immediately (underlined) and are reconciled with the
+  program's real echo, mosh-style. Toggle with `ctrl+b e`, or start with `--no-predict`.
+- **Unplaced terminals.** Terminals started with `hc run` that no layout shows are listed at the bottom
+  of the sidebar; Enter puts one into a new tab.
+
+## Install
+
+You need [herdr-core](https://github.com/herdrdev/herdr-core) (`hc`) installed and its core running.
+
+```sh
+cargo install --git https://github.com/BTL00/hc-tui
+```
+
+On Windows with the GNU toolchain, building needs `dlltool` on `PATH` (for example from
+[llvm-mingw](https://github.com/mstorsjo/llvm-mingw)); the MSVC toolchain works as is.
+
+## Use
+
+```sh
+hc-tui                      # sidebar + current tab
+hc-tui --attach review      # open where that terminal is (or adopt it into a tab)
+hc-tui --list               # print machines, workspaces and tabs, then exit
+hc-tui --no-predict         # predictive echo off
+```
+
+`hc-tui` finds `hc` on `PATH`, then in `%LOCALAPPDATA%\Programs\herdr-core`; set `HC_TUI_HC` to override.
+
+### Keys
+
+| Keys | Action |
+| --- | --- |
+| `prefix c` | new tab (a shell in the focused pane's folder) |
+| `prefix v` / `prefix -` | split right / down |
+| `prefix h/j/k/l` | move between panes |
+| `prefix H/J/K/L` | swap with the neighbouring pane |
+| `prefix z` | zoom the focused pane |
+| `prefix x` | close pane (ends its program) |
+| `prefix r` | resize mode: `h/j/k/l`, any other key leaves |
+| `prefix n` / `p` / `1..9` | next / previous / nth tab |
+| `prefix T` / `X` | rename / close tab |
+| `prefix N` / `W` / `D` | new / rename / close workspace |
+| `prefix w` | workspace navigation: `j/k`, `←/→` between workspaces, Enter, Esc |
+| `prefix g` | goto picker: `/` search, `b w i d a` filters, Enter |
+| `prefix b` | toggle the sidebar |
+| `prefix e` | toggle predictive echo |
+| `prefix q` | detach; everything keeps running |
+| `prefix ctrl+b` | send `ctrl+b` to the program |
+
+## How it works
+
+hc-tui runs `hc connect` twice: one framed connection for calls and terminal streams
+(`terminal.attach`), one plain connection for `events.subscribe`. Each visible pane is attached with its
+own size and rendered through a local [vt100](https://crates.io/crates/vt100) screen; the core answers the
+programs' display queries. Layout changes go through `doc.get` / `doc.set` on the `herdr-app` document.
+
+## Limitations
+
+- No copy mode / scrollback yet, no mouse.
+- Stacks and floating blocks from custom Herdr layouts are shown (the active child) but not editable.
+- The vt100 emulator covers what shells and coding agents use; exotic sequences and graphics are ignored.
+
+## License
+
+Apache-2.0. Includes code adapted from herdr-core, herdr-app and herdr (Apache-2.0); see [NOTICE](NOTICE).
