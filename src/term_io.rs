@@ -133,14 +133,17 @@ mod imp {
 mod imp {
     use std::io::Read;
 
-    pub type Saved = ();
+    /// Whether raw mode was turned on (and so must be turned off).
+    pub type Saved = bool;
 
     pub fn enter() -> Saved {
-        let _ = ratatui::crossterm::terminal::enable_raw_mode();
+        ratatui::crossterm::terminal::enable_raw_mode().is_ok()
     }
 
-    pub fn leave(_: &Saved) {
-        let _ = ratatui::crossterm::terminal::disable_raw_mode();
+    pub fn leave(saved: &Saved) {
+        if *saved {
+            let _ = ratatui::crossterm::terminal::disable_raw_mode();
+        }
     }
 
     pub fn read(_ms: u32) -> Option<Vec<u8>> {
