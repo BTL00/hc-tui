@@ -264,10 +264,26 @@ fn at_path<'a>(mut node: &'a mut Value, path: &[usize]) -> &'a mut Value {
     node
 }
 
+/// The line between two neighbours in a row (a vertical line) or a column.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Divider {
+    pub rect: Rect,
+    /// A vertical line, between children of a row.
+    pub vertical: bool,
+    /// Child indices from the root down to the container.
+    pub path: Vec<usize>,
+    /// The two children it separates (indices into `children`).
+    pub before: usize,
+    pub after: usize,
+    /// Where `before` starts, and the length of both plus the line, along the axis.
+    pub start: u16,
+    pub span: u16,
+}
+
 /// Where each visible terminal goes inside `area`, plus divider lines.
 pub struct Placed {
     pub panes: Vec<(String, Rect)>,
-    pub dividers: Vec<(Rect, bool)>,
+    pub dividers: Vec<Divider>,
 }
 
 pub fn place(root: &Value, area: Rect, zoomed: Option<&str>) -> Placed {
@@ -283,11 +299,11 @@ pub fn place(root: &Value, area: Rect, zoomed: Option<&str>) -> Placed {
             return out;
         }
     }
-    place_in(root, area, &mut out);
+    place_in(root, area, &mut Vec::new(), &mut out);
     out
 }
 
-fn place_in(node: &Value, area: Rect, out: &mut Placed) {
+fn place_in(node: &Value, area: Rect, path: &mut Vec<usize>, out: &mut Placed) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -298,14 +314,16 @@ fn place_in(node: &Value, area: Rect, out: &mut Placed) {
             }
         }
         "stack" => {
-            let children: Vec<&Value> = visible(node);
+            let children = visible(node);
             let active = node["active"].as_str();
             let shown = children
                 .iter()
-                .find(|c| active.is_some() && c["id"].as_str() == active)
+                .find(|(_, c)| active.is_some() && c["id"].as_str() == active)
                 .or(children.first());
-            if let Some(c) = shown {
-                place_in(c, area, out);
+            if let Some((i, c)) = shown {
+                path.push(*i);
+                place_in(c, area, path, out);
+                path.pop();
             }
         }
         k @ ("row" | "column") => {
@@ -321,7 +339,7 @@ fn place_in(node: &Value, area: Rect, out: &mut Placed) {
             let cell_px = if horizontal { 8.0 } else { 16.0 };
             let fixed: Vec<Option<u16>> = children
                 .iter()
-                .map(|c| {
+                .map(|(_, c)| {
                     c["size"]["px"]
                         .as_f64()
                         .map(|px| (px / cell_px).round().max(1.0) as u16)
@@ -331,7 +349,7 @@ fn place_in(node: &Value, area: Rect, out: &mut Placed) {
             let weights: Vec<f64> = children
                 .iter()
                 .zip(&fixed)
-                .map(|(c, f)| {
+                .map(|((_, c), f)| {
                     if f.is_some() {
                         0.0
                     } else {
@@ -352,7 +370,8 @@ fn place_in(node: &Value, area: Rect, out: &mut Placed) {
                 sizes[i] += avail.saturating_sub(used);
             }
             let mut pos = if horizontal { area.x } else { area.y };
-            for (i, (c, size)) in children.iter().zip(&sizes).enumerate() {
+            for (k, ((i, c), size)) in children.iter().zip(&sizes).enumerate() {
+                let child_start = pos;
                 let r = if horizontal {
                     Rect {
                         x: pos,
@@ -368,9 +387,11 @@ fn place_in(node: &Value, area: Rect, out: &mut Placed) {
                         height: *size,
                     }
                 };
-                place_in(c, r, out);
+                path.push(*i);
+                place_in(c, r, path, out);
+                path.pop();
                 pos += size;
-                if i + 1 < children.len() {
+                if k + 1 < children.len() {
                     let d = if horizontal {
                         Rect {
                             x: pos,
@@ -386,7 +407,15 @@ fn place_in(node: &Value, area: Rect, out: &mut Placed) {
                             height: 1,
                         }
                     };
-                    out.dividers.push((d, horizontal));
+                    out.dividers.push(Divider {
+                        rect: d,
+                        vertical: horizontal,
+                        path: path.clone(),
+                        before: *i,
+                        after: children[k + 1].0,
+                        start: child_start,
+                        span: size + 1 + sizes[k + 1],
+                    });
                     pos += 1;
                 }
             }
@@ -395,15 +424,46 @@ fn place_in(node: &Value, area: Rect, out: &mut Placed) {
     }
 }
 
-fn visible(node: &Value) -> Vec<&Value> {
+/// Children that are shown, with their index in `children`.
+fn visible(node: &Value) -> Vec<(usize, &Value)> {
     node["children"]
         .as_array()
         .map(|a| {
             a.iter()
-                .filter(|c| c["hidden"].as_bool() != Some(true))
+                .enumerate()
+                .filter(|(_, c)| c["hidden"].as_bool() != Some(true))
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Moves a divider (mouse drag) so `before` gets `cells` of the room it
+/// shares with `after`. Changes weights only; fixed-size panes stay.
+pub fn set_split(root: &mut Value, d: &Divider, cells: u16) -> bool {
+    let mut node = root;
+    for &i in &d.path {
+        node = &mut node["children"][i];
+    }
+    let Some(children) = node["children"].as_array_mut() else {
+        return false;
+    };
+    let (Some(a), Some(b)) = (children.get(d.before), children.get(d.after)) else {
+        return false;
+    };
+    if a["size"]["px"].is_number() || b["size"]["px"].is_number() {
+        return false;
+    }
+    let room = d.span.saturating_sub(1);
+    if room < 4 {
+        return false;
+    }
+    let cells = cells.clamp(2, room - 2);
+    let weight = |c: &Value| c["size"]["weight"].as_f64().unwrap_or(1.0);
+    let total = weight(a) + weight(b);
+    let frac = f64::from(cells) / f64::from(room);
+    children[d.before]["size"] = json!({"weight": total * frac});
+    children[d.after]["size"] = json!({"weight": total * (1.0 - frac)});
+    true
 }
 
 #[cfg(test)]
@@ -464,6 +524,30 @@ mod tests {
         assert!(p.panes[0].1.width > p.panes[1].1.width);
         let z = place(&t["root"], Rect::new(0, 0, 81, 20), Some("t2"));
         assert_eq!(z.panes, vec![("t2".to_string(), Rect::new(0, 0, 81, 20))]);
+    }
+
+    #[test]
+    fn dragging_a_divider_moves_it() {
+        let mut t = tab("main", "t1");
+        split(&mut t["root"], "t1", "t2", "row");
+        split(&mut t["root"], "t2", "t3", "column");
+        let area = Rect::new(0, 0, 81, 21);
+        let p = place(&t["root"], area, None);
+        assert_eq!(p.dividers.len(), 2);
+        let d = p.dividers.iter().find(|d| d.vertical).unwrap().clone();
+        assert_eq!((d.start, d.span), (0, 81));
+        // Drop the line at column 20: t1 gets 20 columns.
+        assert!(set_split(&mut t["root"], &d, 20));
+        let p = place(&t["root"], area, None);
+        let t1 = p.panes.iter().find(|(id, _)| id == "t1").unwrap().1;
+        assert_eq!(t1.width, 20);
+        // The nested column's divider knows its own container.
+        let h = p.dividers.iter().find(|d| !d.vertical).unwrap().clone();
+        assert_eq!((h.start, h.span), (0, 21));
+        assert!(set_split(&mut t["root"], &h, 5));
+        let p = place(&t["root"], area, None);
+        let t2 = p.panes.iter().find(|(id, _)| id == "t2").unwrap().1;
+        assert_eq!(t2.height, 5);
     }
 
     #[test]

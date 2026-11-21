@@ -43,6 +43,10 @@ with predictive local echo for laggy links.
   `ctrl+b a` jumps to the next one. Focusing the pane clears it.
 - **Predictive echo.** Printable keys show up immediately (underlined) and are reconciled with the
   program's real echo, mosh-style. Toggle with `ctrl+b e`, or start with `--no-predict`.
+- **Mouse.** Click a tab or pane in the sidebar to go there, click a pane to focus it, drag a divider to
+  resize, wheel to scroll a pane's history (typing jumps back down). Programs that use the mouse themselves
+  (editors, htop) get the clicks and the wheel. `ctrl+b m` or `--no-mouse` turns it off so you can select
+  text the usual way; in Windows Terminal, shift+drag selects even with the mouse on.
 - **Unplaced terminals.** Terminals started with `hc run` that no layout shows are listed at the bottom
   of the sidebar; Enter puts one into a new tab.
 
@@ -64,6 +68,7 @@ hc-tui                      # sidebar + current tab
 hc-tui --attach review      # open where that terminal is (or adopt it into a tab)
 hc-tui --list               # print machines, workspaces and tabs, then exit
 hc-tui --no-predict         # predictive echo off
+hc-tui --no-mouse           # mouse off (select text natively)
 ```
 
 `hc-tui` finds `hc` on `PATH`, then in `%LOCALAPPDATA%\Programs\herdr-core`; set `HC_TUI_HC` to override.
@@ -86,6 +91,7 @@ hc-tui --no-predict         # predictive echo off
 | `prefix g` | goto picker: `/` search, `b w i d a` filters, Enter |
 | `prefix a` | jump to the next agent waiting for you |
 | `prefix b` | toggle the sidebar |
+| `prefix m` | toggle the mouse |
 | `prefix e` | toggle predictive echo |
 | `prefix q` | detach; everything keeps running |
 | `prefix ctrl+b` | send `ctrl+b` to the program |

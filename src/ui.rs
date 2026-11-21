@@ -38,8 +38,9 @@ pub fn areas(app: &App, area: Rect) -> (Option<Rect>, Rect, Rect) {
 
 pub fn draw(f: &mut Frame, app: &App) {
     let (side, tab, status) = areas(app, f.area());
-    if let Some(side) = side {
-        draw_sidebar(f, app, side);
+    match side {
+        Some(side) => draw_sidebar(f, app, side),
+        None => app.sidebar_view.set((Rect::default(), 0)),
     }
     draw_tab(f, app, tab);
     draw_status(f, app, status);
@@ -352,20 +353,21 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     } else {
         " hc-tui "
     };
+    let block = Block::default()
+        .borders(Borders::RIGHT)
+        .border_style(Style::new().fg(if navigating { YELLOW } else { BG2 }))
+        .title(Span::styled(
+            title,
+            Style::new().fg(if navigating { YELLOW } else { DIM }),
+        ))
+        .style(Style::new().bg(BG));
+    let inner = block.inner(area);
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::RIGHT)
-                .border_style(Style::new().fg(if navigating { YELLOW } else { BG2 }))
-                .title(Span::styled(
-                    title,
-                    Style::new().fg(if navigating { YELLOW } else { DIM }),
-                ))
-                .style(Style::new().bg(BG)),
-        )
+        .block(block)
         .highlight_style(Style::new().bg(BG2).add_modifier(Modifier::BOLD));
     let mut state = ListState::default().with_selected(selected);
     f.render_stateful_widget(list, area, &mut state);
+    app.sidebar_view.set((inner, state.offset()));
     let mut notes: Vec<String> = app
         .doc_errors()
         .iter()
@@ -417,7 +419,8 @@ fn draw_tab(f: &mut Frame, app: &App, area: Rect) {
         .as_ref()
         .and_then(|a| app.placed.iter().find(|(p, _)| p == a))
         .map(|(_, r)| *r);
-    for (rect, vertical) in &app.dividers {
+    for d in &app.dividers {
+        let (rect, vertical) = (&d.rect, &d.vertical);
         // Dividers next to the focused pane light up.
         let touches = focus_rect.is_some_and(|fr| {
             if *vertical {
@@ -437,6 +440,31 @@ fn draw_tab(f: &mut Frame, app: &App, area: Rect) {
                 if let Some(c) = buf.cell_mut((x, y)) {
                     c.set_symbol(if *vertical { "│" } else { "─" })
                         .set_style(style);
+                }
+            }
+        }
+    }
+    // A divider being dragged: where it will land.
+    if let Some((d, at)) = &app.drag {
+        let line = if d.vertical {
+            Rect {
+                x: *at,
+                width: 1,
+                ..d.rect
+            }
+        } else {
+            Rect {
+                y: *at,
+                height: 1,
+                ..d.rect
+            }
+        };
+        let buf = f.buffer_mut();
+        for y in line.y..line.y + line.height {
+            for x in line.x..line.x + line.width {
+                if let Some(c) = buf.cell_mut((x, y)) {
+                    c.set_symbol(if d.vertical { "┃" } else { "━" })
+                        .set_style(Style::new().fg(YELLOW));
                 }
             }
         }
@@ -507,6 +535,22 @@ fn draw_pane(f: &mut Frame, app: &App, address: &str, pane: &Pane, area: Rect, f
         };
         f.render_widget(
             Paragraph::new(note).style(Style::new().fg(BG).bg(DIM)),
+            rect,
+        );
+        return;
+    }
+    let scrolled = screen.scrollback();
+    if scrolled > 0 {
+        let note = format!(" ↑ {scrolled} lines · type or wheel down ");
+        let w = (note.chars().count() as u16).min(area.width);
+        let rect = Rect {
+            x: area.x + area.width.saturating_sub(w),
+            y: area.y,
+            width: w,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(note).style(Style::new().fg(BG).bg(YELLOW)),
             rect,
         );
         return;

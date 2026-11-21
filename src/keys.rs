@@ -161,6 +161,7 @@ pub enum Action {
     Help,
     TogglePredict,
     NextWaiting,
+    ToggleMouse,
     SendPrefix,
     Cancel,
 }
@@ -199,6 +200,7 @@ pub fn prefix_action(key: Key) -> Option<Action> {
         Key::Char('?') => Help,
         Key::Char('e') => TogglePredict,
         Key::Char('a') => NextWaiting,
+        Key::Char('m') => ToggleMouse,
         Key::Ctrl('b') => SendPrefix,
         Key::Esc | Key::Ctrl('[') | Key::Ctrl('c') => Cancel,
         _ => return None,
@@ -224,6 +226,11 @@ pub const HELP: &[(&str, &str)] = &[
     ("prefix a", "jump to the next agent waiting for you"),
     ("prefix b", "toggle sidebar"),
     ("prefix e", "toggle predictive echo"),
+    ("prefix m", "toggle the mouse (off: select text natively)"),
+    (
+        "mouse",
+        "click tab/pane, wheel scrolls history, drag dividers",
+    ),
     ("prefix q", "detach (everything keeps running)"),
     ("prefix ctrl+b", "send ctrl+b to the program"),
     ("prefix ?", "this help"),
@@ -234,9 +241,165 @@ pub const HELP: &[(&str, &str)] = &[
     ),
     ("not yet", "copy mode ([)"),
 ];
+
+/// A mouse report from the outer terminal (SGR form), 0-based cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mouse {
+    /// xterm button code: low bits button (0 left, 1 middle, 2 right),
+    /// +4 shift, +8 alt, +16 ctrl, +32 motion, +64 wheel (64 up, 65 down).
+    pub code: u16,
+    pub x: u16,
+    pub y: u16,
+    pub release: bool,
+}
+
+impl Mouse {
+    pub fn wheel(&self) -> Option<bool> {
+        (self.code & 64 != 0).then_some(self.code & 1 == 0)
+    }
+    pub fn motion(&self) -> bool {
+        self.code & 32 != 0
+    }
+    pub fn left_press(&self) -> bool {
+        !self.release && self.code & (64 | 32 | 3) == 0
+    }
+}
+
+pub enum MouseParse {
+    Done(Mouse, usize),
+    /// The start of a report; the rest is still on its way.
+    Partial,
+    NotMouse,
+}
+
+/// `ESC [ < code ; x ; y (M|m)` at the start of `input`.
+pub fn parse_mouse(input: &[u8]) -> MouseParse {
+    const START: &[u8] = b"\x1b[<";
+    if input.len() < START.len() {
+        return if START.starts_with(input) && !input.is_empty() && input.len() > 1 {
+            MouseParse::Partial
+        } else {
+            MouseParse::NotMouse
+        };
+    }
+    if !input.starts_with(START) {
+        return MouseParse::NotMouse;
+    }
+    let rest = &input[3..];
+    let Some(end) = rest
+        .iter()
+        .position(|b| !(b.is_ascii_digit() || *b == b';'))
+    else {
+        return if rest.len() < 16 {
+            MouseParse::Partial
+        } else {
+            MouseParse::NotMouse
+        };
+    };
+    if !matches!(rest[end], b'M' | b'm') {
+        return MouseParse::NotMouse;
+    }
+    let nums: Vec<u16> = std::str::from_utf8(&rest[..end])
+        .unwrap_or("")
+        .split(';')
+        .filter_map(|n| n.parse().ok())
+        .collect();
+    let [code, x, y] = nums[..] else {
+        return MouseParse::NotMouse;
+    };
+    MouseParse::Done(
+        Mouse {
+            code,
+            x: x.saturating_sub(1),
+            y: y.saturating_sub(1),
+            release: rest[end] == b'm',
+        },
+        3 + end + 1,
+    )
+}
+
+/// The report a program inside a pane asked for (its mode and encoding),
+/// at cell (`col`, `row`) of that pane. None: it doesn't want this event.
+pub fn encode_mouse(
+    m: &Mouse,
+    col: u16,
+    row: u16,
+    mode: vt100::MouseProtocolMode,
+    encoding: vt100::MouseProtocolEncoding,
+) -> Option<Vec<u8>> {
+    use vt100::{MouseProtocolEncoding as E, MouseProtocolMode as P};
+    let wanted = match mode {
+        P::None => false,
+        P::Press => !m.release && !m.motion(),
+        P::PressRelease => !m.motion(),
+        _ => true,
+    };
+    if !wanted {
+        return None;
+    }
+    if encoding == E::Sgr {
+        let end = if m.release { 'm' } else { 'M' };
+        return Some(format!("\x1b[<{};{};{}{end}", m.code, col + 1, row + 1).into_bytes());
+    }
+    // Older forms: release is button 3, everything offset by 32.
+    let code = if m.release { (m.code & !3) | 3 } else { m.code };
+    let mut out = b"\x1b[M".to_vec();
+    for v in [code, col + 1, row + 1] {
+        let v = u32::from(v) + 32;
+        match encoding {
+            E::Utf8 => {
+                let c = char::from_u32(v.min(2047)).unwrap_or(' ');
+                let mut b = [0u8; 4];
+                out.extend(c.encode_utf8(&mut b).as_bytes());
+            }
+            _ => out.push(v.min(255) as u8),
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_mouse_reports() {
+        let MouseParse::Done(m, used) = parse_mouse(b"\x1b[<0;12;5Mrest") else {
+            panic!("not parsed");
+        };
+        assert_eq!(used, 10);
+        assert_eq!((m.x, m.y, m.release), (11, 4, false));
+        assert!(m.left_press());
+        let MouseParse::Done(w, _) = parse_mouse(b"\x1b[<65;1;1M") else {
+            panic!("wheel");
+        };
+        assert_eq!(w.wheel(), Some(false));
+        assert!(matches!(parse_mouse(b"\x1b[<0;1"), MouseParse::Partial));
+        assert!(matches!(parse_mouse(b"\x1b["), MouseParse::Partial));
+        assert!(matches!(parse_mouse(b"\x1b[A"), MouseParse::NotMouse));
+        assert!(matches!(parse_mouse(b"x"), MouseParse::NotMouse));
+    }
+
+    #[test]
+    fn encodes_for_programs() {
+        use vt100::{MouseProtocolEncoding as E, MouseProtocolMode as P};
+        let m = Mouse {
+            code: 0,
+            x: 50,
+            y: 9,
+            release: true,
+        };
+        assert_eq!(
+            encode_mouse(&m, 3, 4, P::PressRelease, E::Sgr).unwrap(),
+            b"\x1b[<0;4;5m"
+        );
+        assert_eq!(
+            encode_mouse(&m, 3, 4, P::PressRelease, E::Default).unwrap(),
+            b"\x1b[M\x23\x24\x25"
+        );
+        assert!(encode_mouse(&m, 3, 4, P::Press, E::Sgr).is_none());
+        assert!(encode_mouse(&m, 3, 4, P::None, E::Sgr).is_none());
+    }
 
     #[test]
     fn parses_common_keys() {

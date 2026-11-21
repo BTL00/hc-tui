@@ -55,7 +55,27 @@ impl Predictor {
             return;
         };
         let cols = screen.size().1.get();
-        for ch in text.chars() {
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' {
+                // Arrows, function keys, alt+key: whole sequences, never text.
+                // They usually move the cursor, so old guesses are off too.
+                self.items.clear();
+                match chars.next() {
+                    Some('[') => {
+                        for c in chars.by_ref() {
+                            if ('\x40'..='\x7e').contains(&c) {
+                                break;
+                            }
+                        }
+                    }
+                    Some('O') => {
+                        chars.next();
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             match ch {
                 '\x7f' | '\x08' => {
                     self.items.pop();
@@ -145,6 +165,21 @@ mod tests {
         p.typed(b"abc\x7f", parser.screen());
         assert_eq!(p.items().len(), 2);
         p.typed(b"\r", parser.screen());
+        assert!(p.items().is_empty());
+    }
+
+    #[test]
+    fn escape_sequences_are_not_text() {
+        let parser = parser(5, 20);
+        let mut p = Predictor::new(true);
+        p.typed(b"\x1b[A", parser.screen());
+        assert!(p.items().is_empty());
+        p.typed(b"\x1bOB", parser.screen());
+        assert!(p.items().is_empty());
+        p.typed(b"ab\x1b[Dc", parser.screen());
+        assert_eq!(p.items().len(), 1);
+        assert_eq!(p.items()[0].ch, 'c');
+        p.typed(b"\x1b[1;5C", parser.screen());
         assert!(p.items().is_empty());
     }
 

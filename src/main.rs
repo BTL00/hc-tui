@@ -20,14 +20,15 @@ enum Event {
 
 const USAGE: &str = "hc-tui - terminal UI for herdr-core (hc)
 
-Usage: hc-tui [--no-predict] [--attach <terminal>] [--list]
+Usage: hc-tui [--no-predict] [--no-mouse] [--attach <terminal>] [--list]
 
   --no-predict        start with predictive echo off (toggle: ctrl+b e)
+  --no-mouse          start with the mouse off (toggle: ctrl+b m)
   --attach <t>        attach to this terminal first (t7, a name, machine/t7)
   --list              print machines, workspaces and tabs, then exit
   -V, --version       print the version
 
-Environment: HC_TUI_HC=<path to hc>, HC_TUI_PREDICT=0
+Environment: HC_TUI_HC=<path to hc>, HC_TUI_PREDICT=0, HC_TUI_MOUSE=0
 Keys: herdr defaults, prefix ctrl+b. ctrl+b ? shows them all.";
 
 fn main() {
@@ -41,11 +42,15 @@ fn run() -> Result<()> {
     let mut predict = std::env::var("HC_TUI_PREDICT")
         .map(|v| v != "0")
         .unwrap_or(true);
+    let mut mouse = std::env::var("HC_TUI_MOUSE")
+        .map(|v| v != "0")
+        .unwrap_or(true);
     let mut first: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--no-predict" => predict = false,
+            "--no-mouse" => mouse = false,
             "--attach" => first = args.next(),
             "--list" => return list(),
             "-V" | "--version" => {
@@ -81,6 +86,7 @@ fn run() -> Result<()> {
     term_io::spawn_reader(tx, Event::Input);
 
     let mut app = app::App::new(conn, predict);
+    app.set_mouse(mouse);
     let size = terminal.size()?;
     let (_, tab, _) = ui::areas(
         &app,
@@ -118,6 +124,9 @@ fn run() -> Result<()> {
         Ok(())
     })();
 
+    if app.mouse {
+        term_io::set_mouse(false);
+    }
     app.shutdown();
     drop(raw);
     ratatui::restore();

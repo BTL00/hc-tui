@@ -12,6 +12,10 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+/// Lines each pane keeps for the mouse wheel, and how many to fetch on attach.
+const SCROLLBACK: usize = 5000;
+const HISTORY: usize = 500;
+
 pub fn nz(n: u16) -> std::num::NonZeroU16 {
     std::num::NonZeroU16::new(n.max(1)).unwrap_or(std::num::NonZeroU16::MIN)
 }
@@ -179,7 +183,7 @@ pub struct App {
     pub zoomed: Option<String>,
     pub panes: HashMap<String, Pane>,
     pub placed: Vec<(String, Rect)>,
-    pub dividers: Vec<(Rect, bool)>,
+    pub dividers: Vec<layout::Divider>,
     tab_area: Rect,
     pub mode: Mode,
     pub sidebar: bool,
@@ -188,6 +192,14 @@ pub struct App {
     pub quit: bool,
     pub nav_cursor: usize,
     pub picker_cursor: usize,
+    /// Mouse reports on (ctrl+b m).
+    pub mouse: bool,
+    /// A divider being dragged and where the pointer is along its axis.
+    pub drag: Option<(layout::Divider, u16)>,
+    /// Sidebar rows on screen and the list's scroll offset, as last drawn.
+    pub sidebar_view: std::cell::Cell<(Rect, usize)>,
+    /// The start of a mouse report whose rest has not arrived yet.
+    pending: Vec<u8>,
     refresh_due: Option<Instant>,
     doc_errors: Vec<String>,
     /// Terminals that stopped (turn done, blocked, error) since you last looked.
@@ -228,6 +240,10 @@ impl App {
             quit: false,
             nav_cursor: 0,
             picker_cursor: 0,
+            mouse: true,
+            drag: None,
+            sidebar_view: std::cell::Cell::new((Rect::default(), 0)),
+            pending: Vec::new(),
             refresh_due: None,
             doc_errors: Vec::new(),
             attention: HashSet::new(),
@@ -564,11 +580,11 @@ impl App {
     fn attach(&mut self, address: &str, (cols, rows): (u16, u16)) {
         let mut pane = Pane {
             channel: 0,
-            parser: vt100::Parser::new(nz(rows), nz(cols), 0),
+            parser: vt100::Parser::new(nz(rows), nz(cols), SCROLLBACK),
             size: (cols, rows),
             ended: None,
         };
-        let params = json!({"terminal": address, "cols": cols, "rows": rows, "history": 0});
+        let params = json!({"terminal": address, "cols": cols, "rows": rows, "history": HISTORY});
         match self.conn.call("terminal.attach", params) {
             Ok(r) => pane.channel = r["channel"].as_u64().unwrap_or(0) as u32,
             Err(e) => pane.ended = Some(format!("{e:#}")),
@@ -623,16 +639,43 @@ impl App {
 
     // ----- input ----------------------------------------------------------
 
-    pub fn input(&mut self, mut bytes: &[u8]) {
+    pub fn input(&mut self, incoming: &[u8]) {
+        let mut owned = std::mem::take(&mut self.pending);
+        owned.extend_from_slice(incoming);
+        let mut bytes = &owned[..];
         while !bytes.is_empty() {
+            match keys::parse_mouse(bytes) {
+                keys::MouseParse::Done(m, used) => {
+                    bytes = &bytes[used..];
+                    self.mouse_event(m);
+                    continue;
+                }
+                keys::MouseParse::Partial => {
+                    self.pending = bytes.to_vec();
+                    return;
+                }
+                keys::MouseParse::NotMouse => {}
+            }
             if self.mode == Mode::Normal {
-                match bytes.iter().position(|&b| b == 0x02) {
-                    Some(at) => {
+                // Up to the prefix or the next mouse report goes to the program.
+                let stop = bytes
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .position(|(i, &b)| b == 0x1b && bytes.get(i + 1) == Some(&b'['))
+                    .map(|p| p + 1);
+                let prefix = bytes.iter().position(|&b| b == 0x02);
+                match (prefix, stop) {
+                    (Some(at), s) if s.is_none_or(|s| at < s) => {
                         self.forward(&bytes[..at]);
                         self.mode = Mode::Prefix;
                         bytes = &bytes[at + 1..];
                     }
-                    None => {
+                    (_, Some(s)) => {
+                        self.forward(&bytes[..s]);
+                        bytes = &bytes[s..];
+                    }
+                    _ => {
                         self.forward(bytes);
                         return;
                     }
@@ -650,12 +693,180 @@ impl App {
             return;
         }
         let Some(f) = self.focused() else { return };
-        if let Some(p) = self.panes.get(&f)
+        if let Some(p) = self.panes.get_mut(&f)
             && p.ended.is_none()
         {
+            // Typing brings a scrolled-back pane to the bottom again.
+            p.parser.screen_mut().set_scrollback(0);
             self.predict.typed(bytes, p.parser.screen());
             self.conn.send(p.channel, hc::DATA, bytes);
         }
+    }
+
+    // ----- mouse ----------------------------------------------------------
+
+    pub fn set_mouse(&mut self, on: bool) {
+        self.mouse = on;
+        crate::term_io::set_mouse(on);
+    }
+
+    fn mouse_event(&mut self, m: keys::Mouse) {
+        match self.mode {
+            Mode::Help => {
+                if m.left_press() {
+                    self.mode = Mode::Normal;
+                }
+                return;
+            }
+            Mode::Picker { .. } | Mode::Prompt(..) | Mode::Confirm(_) => return,
+            Mode::Prefix | Mode::Resize => {
+                if !m.motion() && m.wheel().is_none() {
+                    self.mode = Mode::Normal;
+                }
+            }
+            Mode::Navigate | Mode::Normal => {}
+        }
+        if let Some((d, _)) = self.drag.clone() {
+            let along = if d.vertical { m.x } else { m.y };
+            if m.release {
+                self.drag = None;
+                self.drop_divider(&d, along);
+            } else if m.motion() {
+                self.drag = Some((d, along));
+            }
+            return;
+        }
+        let (side, _) = self.sidebar_view.get();
+        if self.sidebar && contains(side, m.x, m.y) {
+            if m.left_press() {
+                let (_, offset) = self.sidebar_view.get();
+                self.sidebar_click(offset + (m.y - side.y) as usize);
+            }
+            return;
+        }
+        if !contains(self.tab_area, m.x, m.y) {
+            return;
+        }
+        if m.left_press()
+            && let Some(d) = self
+                .dividers
+                .iter()
+                .find(|d| contains(d.rect, m.x, m.y))
+                .cloned()
+        {
+            let along = if d.vertical { m.x } else { m.y };
+            self.drag = Some((d, along));
+            return;
+        }
+        let Some((address, rect)) = self
+            .placed
+            .iter()
+            .find(|(_, r)| contains(*r, m.x, m.y))
+            .cloned()
+        else {
+            return;
+        };
+        self.pane_mouse(&address, rect, m);
+    }
+
+    fn pane_mouse(&mut self, address: &str, rect: Rect, m: keys::Mouse) {
+        let (col, row) = (m.x - rect.x, m.y - rect.y);
+        let pressed = !m.release && !m.motion() && m.wheel().is_none();
+        if pressed && self.focused().as_deref() != Some(address) {
+            if self.mode == Mode::Navigate {
+                self.mode = Mode::Normal;
+            }
+            self.set_focus(address);
+            self.relayout();
+        }
+        // Agents (claude, codex...) read arrows as "pick another answer", so the
+        // wheel never turns into arrow keys for them.
+        let agent = self.term(address).is_some_and(|t| !t.app.is_empty());
+        let Some(p) = self.panes.get_mut(address) else {
+            return;
+        };
+        if p.ended.is_some() {
+            return;
+        }
+        let screen = p.parser.screen();
+        let (mode, encoding) = (
+            screen.mouse_protocol_mode(),
+            screen.mouse_protocol_encoding(),
+        );
+        // The program handles the mouse itself (editors, htop, ...).
+        if mode != vt100::MouseProtocolMode::None {
+            if let Some(bytes) = keys::encode_mouse(&m, col, row, mode, encoding) {
+                self.conn.send(p.channel, hc::DATA, &bytes);
+            }
+            return;
+        }
+        let Some(up) = m.wheel() else { return };
+        if screen.alternate_screen() {
+            if agent {
+                return;
+            }
+            // Full-screen programs without mouse support (less, man): arrow keys.
+            let key: &[u8] = match (up, screen.application_cursor()) {
+                (true, false) => b"\x1b[A",
+                (false, false) => b"\x1b[B",
+                (true, true) => b"\x1bOA",
+                (false, true) => b"\x1bOB",
+            };
+            self.conn.send(p.channel, hc::DATA, &key.repeat(3));
+            return;
+        }
+        let now = screen.scrollback();
+        let next = if up { now + 3 } else { now.saturating_sub(3) };
+        p.parser.screen_mut().set_scrollback(next);
+    }
+
+    fn sidebar_click(&mut self, row: usize) {
+        if self.mode == Mode::Navigate {
+            self.mode = Mode::Normal;
+        }
+        let tab_ref = |app: &App, si: usize, ti: usize| {
+            let s = &app.spaces[si];
+            TabRef {
+                on: s.on.clone(),
+                space: s.id.clone(),
+                tab: s.tabs[ti].id.clone(),
+            }
+        };
+        match self.rows.get(row).cloned() {
+            Some(Row::Tab(si, ti)) => {
+                let r = tab_ref(self, si, ti);
+                self.activate(r);
+            }
+            Some(Row::Pane(si, ti, pi)) => {
+                if let Some(a) = self.spaces[si].tabs[ti].terminals.get(pi).cloned() {
+                    self.reveal(&a);
+                }
+            }
+            Some(Row::Space(si)) if !self.spaces[si].tabs.is_empty() => {
+                let r = tab_ref(self, si, 0);
+                self.activate(r);
+            }
+            Some(Row::Loose(i)) => self.adopt(i),
+            _ => {}
+        }
+    }
+
+    /// Ends a divider drag: the line goes where the pointer is.
+    fn drop_divider(&mut self, d: &layout::Divider, at: u16) {
+        let Some(c) = self.current.clone() else {
+            return;
+        };
+        let cells = at.saturating_sub(d.start);
+        let here = if d.vertical { d.rect.x } else { d.rect.y };
+        if at == here {
+            return;
+        }
+        let (space, tab) = (c.space.clone(), c.tab.clone());
+        let d = d.clone();
+        self.edit_doc(&c.on, |doc| {
+            layout::find_tab(doc, &space, &tab)
+                .is_some_and(|t| layout::set_split(&mut t["root"], &d, cells))
+        });
     }
 
     fn key(&mut self, key: Key) {
@@ -797,6 +1008,15 @@ impl App {
                     }
                     None => self.say("nobody is waiting for you"),
                 }
+            }
+            ToggleMouse => {
+                let on = !self.mouse;
+                self.set_mouse(on);
+                self.say(if on {
+                    "mouse on"
+                } else {
+                    "mouse off: select text with the mouse, ctrl+b m turns it back on"
+                });
             }
             SendPrefix => self.forward(&[0x02]),
             Cancel => {}
@@ -1560,4 +1780,8 @@ impl App {
     pub fn doc_errors(&self) -> &[String] {
         &self.doc_errors
     }
+}
+
+fn contains(r: Rect, x: u16, y: u16) -> bool {
+    x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
 }
