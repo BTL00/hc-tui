@@ -66,8 +66,13 @@ with predictive local echo for laggy links.
 
 You need [herdr-core](https://github.com/herdrdev/herdr-core) (`hc`) installed and its core running.
 
+**Download** a build from [Releases](https://github.com/BTL00/hc-tui/releases/latest): Windows (x64, ARM64), Linux
+(x64, ARM64, static) and macOS (Intel, Apple Silicon). Unpack it and put `hc-tui` somewhere on your `PATH`.
+
+**Or build it** with Rust:
+
 ```sh
-cargo install --git https://github.com/BTL00/hc-tui
+cargo install --git https://github.com/BTL00/hc-tui --tag v1.0.0
 ```
 
 On Windows with the GNU toolchain, building needs `dlltool` on `PATH` (for example from
