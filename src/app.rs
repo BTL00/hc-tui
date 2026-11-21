@@ -247,6 +247,7 @@ pub struct App {
     /// Where the copy picker and the status line's copy chip were drawn.
     pub copy_view: std::cell::Cell<Rect>,
     pub copy_chip: std::cell::Cell<Rect>,
+    copy_pending: Option<bool>,
     /// The start of a mouse report whose rest has not arrived yet.
     pending: Vec<u8>,
     refresh_due: Option<Instant>,
@@ -297,6 +298,7 @@ impl App {
             settings: Settings::default(),
             copy_view: std::cell::Cell::new(Rect::default()),
             copy_chip: std::cell::Cell::new(Rect::default()),
+            copy_pending: None,
             pending: Vec::new(),
             refresh_due: None,
             doc_errors: Vec::new(),
@@ -762,7 +764,26 @@ impl App {
 
     /// Opens the copy picker for the focused Claude pane, or (`newest`) copies
     /// the newest code block straight away.
+    /// Asks for the copy picker; it is filled after the next frame, so
+    /// "reading…" shows while a remote transcript comes over.
     pub fn open_copy(&mut self, newest: bool) {
+        self.copy_pending = Some(newest);
+        self.say("reading Claude's transcript…");
+    }
+
+    pub fn has_pending(&self) -> bool {
+        self.copy_pending.is_some()
+    }
+
+    /// Work asked for during input that should wait until it has been drawn.
+    pub fn run_pending(&mut self) {
+        if let Some(newest) = self.copy_pending.take() {
+            self.message = None;
+            self.load_copy(newest);
+        }
+    }
+
+    fn load_copy(&mut self, newest: bool) {
         let items = match self.copy_items() {
             Ok(items) if !items.is_empty() => items,
             Ok(_) => return self.say("nothing to copy yet: Claude hasn't replied in this session"),
@@ -816,8 +837,8 @@ impl App {
     /// machine it runs. With several sessions in one folder, the one whose
     /// title matches the terminal's wins, else the newest.
     fn transcript_tail(&mut self, term: &Term) -> Result<String, String> {
-        // Remote transcripts: only their end comes over the link. Local: all of it.
-        const LINES: usize = 2000;
+        // Remote: at most this many lines of Claude's text and your prompts.
+        const LINES: usize = 600;
         let slug = crate::copy::slug(&term.cwd);
         let marker = serde_json::to_string(&term.title)
             .map(|t| format!("\"aiTitle\":{t}"))
@@ -852,57 +873,66 @@ impl App {
                 }
             }
             Some(machine) => {
-                let argv = if crate::copy::is_windows_path(&term.cwd) {
-                    vec![
-                        "powershell".to_string(),
-                        "-NoProfile".into(),
-                        "-NonInteractive".into(),
-                        "-Command".into(),
-                        format!(
-                            "Get-ChildItem -LiteralPath (Join-Path $HOME '.claude\\projects\\{slug}') -Filter *.jsonl | Sort-Object LastWriteTime -Descending | Select-Object -First 5 -ExpandProperty FullName"
-                        ),
+                // One round trip: the machine picks the session and sends only
+                // Claude's text and your prompts (no tool output, which is
+                // most of a transcript's megabytes).
+                let argv: Vec<String> = if crate::copy::is_windows_path(&term.cwd) {
+                    let script = format!(
+                        r#"[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$d = Join-Path $HOME ('.claude\projects\' + $env:HCT_SLUG)
+$files = @(Get-ChildItem -LiteralPath $d -Filter *.jsonl -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 5)
+if ($files.Count -eq 0) {{ exit 3 }}
+$pick = $files[0]
+if ($env:HCT_MARK) {{ foreach ($f in $files) {{ if (Select-String -LiteralPath $f.FullName -SimpleMatch -Pattern $env:HCT_MARK -Quiet) {{ $pick = $f; break }} }} }}
+Select-String -LiteralPath $pick.FullName -SimpleMatch -Encoding UTF8 -Pattern '"type":"assistant"','"type":"user"' | Where-Object {{ $l = $_.Line; $l -notlike '*"tool_result"*' -and $l -notlike '*"type":"api-request*' -and ($l -like '*"type":"text"*' -or $l -like '*"type":"user"*') }} | Select-Object -Last {LINES} | ForEach-Object {{ $_.Line }}"#
+                    );
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        &script,
                     ]
+                    .map(String::from)
+                    .to_vec()
                 } else {
-                    vec![
-                        "sh".to_string(),
-                        "-c".into(),
-                        format!(
-                            "ls -t \"$HOME/.claude/projects/{slug}\"/*.jsonl 2>/dev/null | head -5"
-                        ),
-                    ]
+                    let script = format!(
+                        r#"d="$HOME/.claude/projects/$HCT_SLUG"
+files=$(ls -t "$d"/*.jsonl 2>/dev/null | head -5)
+[ -n "$files" ] || exit 3
+pick=$(printf '%s\n' "$files" | head -1)
+if [ -n "$HCT_MARK" ]; then for f in $files; do if grep -qF -- "$HCT_MARK" "$f"; then pick=$f; break; fi; done; fi
+grep -F -e '"type":"assistant"' -e '"type":"user"' "$pick" | grep -vF -e '"tool_result"' -e '"type":"api-request' | grep -F -e '"type":"text"' -e '"type":"user"' | tail -n {LINES}"#
+                    );
+                    ["sh", "-c", &script].map(String::from).to_vec()
                 };
+                let mark = if term.title.is_empty() { "" } else { &marker };
                 let r = self
                     .conn
                     .call(
                         "machine.exec",
-                        json!({"argv": argv, "on": machine, "timeout": 20}),
+                        json!({
+                            "argv": argv,
+                            "on": machine,
+                            "timeout": 30,
+                            "env": {"HCT_SLUG": slug, "HCT_MARK": mark},
+                        }),
                     )
                     .map_err(|e| format!("{e:#}"))?;
-                let out = crate::copy::b64decode(r["stdout"].as_str().unwrap_or(""));
-                let out = String::from_utf8_lossy(&out).to_string();
-                for path in out.lines().map(str::trim).filter(|p| !p.is_empty()) {
-                    let count = self
-                        .conn
-                        .call(
-                            "file.read",
-                            json!({"path": path, "on": machine, "limit": 0}),
-                        )
-                        .map_err(|e| format!("{e:#}"))?;
-                    let lines = count["lines"].as_u64().unwrap_or(0) as usize;
-                    let offset = lines.saturating_sub(LINES).max(1);
-                    let r = self
-                        .conn
-                        .call(
-                            "file.read",
-                            json!({"path": path, "on": machine, "offset": offset, "limit": LINES}),
-                        )
-                        .map_err(|e| format!("{e:#}"))?;
-                    let text = r["text"].as_str().unwrap_or("").to_string();
-                    if matches(&text) {
-                        return Ok(text);
-                    }
-                    first.get_or_insert(text);
+                if r["code"] == 3 {
+                    return Err(format!("no Claude sessions for {} on {machine}", term.cwd));
                 }
+                let out = crate::copy::b64decode(r["stdout"].as_str().unwrap_or(""));
+                let text = String::from_utf8_lossy(&out)
+                    .trim_start_matches('\u{feff}')
+                    .to_string();
+                if text.trim().is_empty() {
+                    let err = crate::copy::b64decode(r["stderr"].as_str().unwrap_or(""));
+                    let err = String::from_utf8_lossy(&err);
+                    let err = err.lines().next().unwrap_or("no output");
+                    return Err(format!("reading the transcript on {machine} failed: {err}"));
+                }
+                return Ok(text);
             }
         }
         first.ok_or_else(|| format!("no Claude session found for {}", term.cwd))

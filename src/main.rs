@@ -115,6 +115,10 @@ fn run() -> Result<()> {
             );
             app.set_area(tab);
             terminal.draw(|f| ui::draw(f, &app))?;
+            if app.has_pending() {
+                app.run_pending();
+                continue;
+            }
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(ev) => handle(&mut app, ev),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -170,7 +174,10 @@ fn snapshot(size: Option<&str>) -> Result<()> {
     if let Some(t) = std::env::args().find_map(|a| a.strip_prefix("copy=").map(str::to_string)) {
         app.goto(&t);
         app.relayout();
+        let started = std::time::Instant::now();
         app.open_copy(std::env::args().any(|a| a == "now"));
+        app.run_pending();
+        println!("loaded in {} ms", started.elapsed().as_millis());
         if let Some((msg, _)) = &app.message {
             println!("message: {msg}");
         }
