@@ -2,12 +2,13 @@
 name = "hc-tui"
 version = "1.0.0"
 edition = "2024"
-description = "Unofficial terminal UI for herdr-core (hc): sidebar, herdr-style keys, predictive echo"
+description = "Terminal UI for herdr-core: many coding agents in one terminal, see who is waiting for you, copy Claude's code exactly"
 license = "Apache-2.0"
 repository = "https://github.com/BTL00/hc-tui"
 readme = "README.md"
 keywords = ["herdr", "terminal", "tui", "agents", "multiplexer"]
 categories = ["command-line-utilities"]
+exclude = ["packaging/", "docs/", ".github/"]
 
 [profile.release]
 lto = true

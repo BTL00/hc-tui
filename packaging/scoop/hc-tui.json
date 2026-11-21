@@ -1,0 +1,35 @@
+{
+    "version": "1.0.0",
+    "description": "Terminal UI for herdr-core: many coding agents in one terminal, see who is waiting for you",
+    "homepage": "https://github.com/BTL00/hc-tui",
+    "license": "Apache-2.0",
+    "notes": "hc-tui needs herdr-core (hc) installed and its core running.",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/BTL00/hc-tui/releases/download/v1.0.0/hc-tui-v1.0.0-x86_64-pc-windows-msvc.zip",
+            "hash": "ed1d76f03580d80ab106741f46bfb74c1681a932c28efe76a4705a33172d127c",
+            "extract_dir": "hc-tui-v1.0.0-x86_64-pc-windows-msvc"
+        },
+        "arm64": {
+            "url": "https://github.com/BTL00/hc-tui/releases/download/v1.0.0/hc-tui-v1.0.0-aarch64-pc-windows-msvc.zip",
+            "hash": "a5ce018316e463ba6efdf64b77fb848a83b71003967acdd8ed4980d897fe5c91",
+            "extract_dir": "hc-tui-v1.0.0-aarch64-pc-windows-msvc"
+        }
+    },
+    "bin": "hc-tui.exe",
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/BTL00/hc-tui/releases/download/v$version/hc-tui-v$version-x86_64-pc-windows-msvc.zip",
+                "hash": { "url": "$url.sha256" },
+                "extract_dir": "hc-tui-v$version-x86_64-pc-windows-msvc"
+            },
+            "arm64": {
+                "url": "https://github.com/BTL00/hc-tui/releases/download/v$version/hc-tui-v$version-aarch64-pc-windows-msvc.zip",
+                "hash": { "url": "$url.sha256" },
+                "extract_dir": "hc-tui-v$version-aarch64-pc-windows-msvc"
+            }
+        }
+    }
+}

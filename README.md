@@ -1,8 +1,21 @@
 # hc-tui
 
-An unofficial terminal UI for [herdr-core](https://github.com/herdrdev/herdr-core) (`hc`): the sidebar,
-splits and keys of the classic herdr TUI, on top of the new hc runtime, across every machine `hc` knows,
-with predictive local echo for laggy links.
+**Run a dozen coding agents in one terminal and see at a glance which one is waiting for you.**
+
+- **Who needs me?** Every agent in a tree (machine → workspace → tab → pane). The ones that finished their
+  turn or wait for a permission light up (`your turn`, `needs you`); `ctrl+b a` jumps to the next one.
+- **Copy code without broken lines.** Claude Code wraps long lines with real line breaks, so code copied
+  from the screen comes out mangled. `ctrl+b y` copies the block exactly as Claude wrote it, read from its
+  transcript, even from a pane on another computer.
+- **All your machines.** Agents on your laptop, desktop and servers in one sidebar, over SSH or Tailscale,
+  with predictive echo so typing stays snappy on slow links.
+- **Mouse, themes, herdr keys.** Click, drag dividers, scroll history; Monokai, Dracula, Tokyo Night and
+  more; the keyboard workflow of the classic herdr TUI.
+
+hc-tui is an unofficial terminal UI for [herdr-core](https://github.com/herdrdev/herdr-core) (`hc`), the
+runtime behind the Herdr desktop and iPhone apps, and shares their layout: split a pane here and it is
+split on your phone too. [Download 1.0.0](https://github.com/BTL00/hc-tui/releases/latest) for Windows,
+Linux or macOS.
 
 > Not affiliated with the herdr project. Built because the herdr 0.9 terminal UI and the new
 > herdr-core runtime don't talk to each other, and I wanted both: herdr's keyboard workflow in a
@@ -68,6 +81,12 @@ You need [herdr-core](https://github.com/herdrdev/herdr-core) (`hc`) installed a
 
 **Download** a build from [Releases](https://github.com/BTL00/hc-tui/releases/latest): Windows (x64, ARM64), Linux
 (x64, ARM64, static) and macOS (Intel, Apple Silicon). Unpack it and put `hc-tui` somewhere on your `PATH`.
+
+**Windows, with [Scoop](https://scoop.sh):**
+
+```powershell
+scoop install https://raw.githubusercontent.com/BTL00/hc-tui/main/packaging/scoop/hc-tui.json
+```
 
 **Or build it** with Rust:
 
