@@ -163,6 +163,8 @@ pub enum Action {
     NextWaiting,
     ToggleMouse,
     OpenSettings,
+    CopyPicker,
+    CopyLast,
     SendPrefix,
     Cancel,
 }
@@ -203,6 +205,8 @@ pub fn prefix_action(key: Key) -> Option<Action> {
         Key::Char('a') => NextWaiting,
         Key::Char('m') => ToggleMouse,
         Key::Char(',') => OpenSettings,
+        Key::Char('y') => CopyPicker,
+        Key::Char('Y') => CopyLast,
         Key::Ctrl('b') => SendPrefix,
         Key::Esc | Key::Ctrl('[') | Key::Ctrl('c') => Cancel,
         _ => return None,

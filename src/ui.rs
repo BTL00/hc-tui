@@ -2,7 +2,7 @@
 //! (predictions on top of the focused one), status line, overlays.
 //! Colours come from the theme picked in settings (`theme.rs`).
 
-use crate::app::{App, Confirm, Mode, Pane, Prompt, Row};
+use crate::app::{App, Confirm, CopyItem, Mode, Pane, Prompt, Row};
 use crate::keys::HELP;
 use crate::theme::{THEMES, Theme};
 use ratatui::Frame;
@@ -56,6 +56,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::Prompt(kind, text) => draw_prompt(f, kind, text, f.area()),
         Mode::Confirm(what) => draw_confirm(f, app, what, f.area()),
         Mode::Settings { cursor } => draw_settings(f, app, *cursor, f.area()),
+        Mode::Copy { items, cursor } => draw_copy(f, app, items, *cursor, f.area()),
         _ => {}
     }
 }
@@ -507,6 +508,7 @@ fn draw_tab(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_pane(f: &mut Frame, app: &App, address: &str, pane: &Pane, area: Rect, focused: bool) {
     let screen = pane.parser.screen();
+    let sel = app.selection.as_ref().filter(|s| s.address == address);
     let (rows, cols) = (screen.size().0.get(), screen.size().1.get());
     let buf = f.buffer_mut();
     for r in 0..rows.min(area.height) {
@@ -532,6 +534,9 @@ fn draw_pane(f: &mut Frame, app: &App, address: &str, pane: &Pane, area: Rect, f
             }
             if cell.dim() {
                 m |= Modifier::DIM;
+            }
+            if sel.is_some_and(|s| s.covers(r, c)) {
+                m ^= Modifier::REVERSED;
             }
             let style = Style::new()
                 .fg(vt_color(cell.fgcolor(), false))
@@ -681,10 +686,30 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         " {}ctrl+b ? help ",
         if app.predict.enabled { "echo⚡ " } else { "" }
     );
+    // A Claude pane in focus gets a clickable copy chip (same as ctrl+b y).
+    let claude = app
+        .focused()
+        .and_then(|a| app.term(&a))
+        .is_some_and(|t| t.app == "claude-code");
+    let chip = if claude { " copy code " } else { "" };
     let left_w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let pad = (area.width as usize)
-        .saturating_sub(left_w + badge.chars().count() + right.chars().count());
+    let right_w = chip.chars().count() + 1 + badge.chars().count() + right.chars().count();
+    let pad = (area.width as usize).saturating_sub(left_w + right_w);
     spans.push(Span::raw(" ".repeat(pad)));
+    let chip_x = area.x + (left_w + pad).min(area.width as usize) as u16;
+    app.copy_chip.set(if claude {
+        Rect::new(chip_x, area.y, chip.chars().count() as u16, 1)
+    } else {
+        Rect::default()
+    });
+    spans.push(Span::styled(
+        chip,
+        Style::new()
+            .fg(th().ink)
+            .bg(th().aqua)
+            .add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::raw(" "));
     spans.push(Span::styled(
         badge,
         Style::new()
@@ -902,4 +927,67 @@ fn draw_settings(f: &mut Frame, app: &App, cursor: usize, area: Rect) {
         .collect();
     f.render_widget(Clear, rect);
     f.render_widget(Paragraph::new(lines).block(popup("settings")), rect);
+}
+
+/// The copy picker: Claude's code blocks, newest first, with a preview.
+fn draw_copy(f: &mut Frame, app: &App, items: &[CopyItem], cursor: usize, area: Rect) {
+    const PREVIEW: usize = 10;
+    let w = area.width.saturating_sub(4).min(100);
+    let shown = items
+        .len()
+        .min(area.height.saturating_sub(PREVIEW as u16 + 6) as usize);
+    let rect = centered(area, w, shown as u16 + PREVIEW as u16 + 4);
+    app.copy_view.set(rect);
+    let inner_w = w.saturating_sub(2) as usize;
+    let mut lines: Vec<Line> = items
+        .iter()
+        .take(shown)
+        .enumerate()
+        .map(|(i, it)| {
+            let on = i == cursor;
+            let key = if i < 9 {
+                format!(" {} ", i + 1)
+            } else {
+                "   ".into()
+            };
+            Line::from(vec![
+                Span::styled(key, Style::new().fg(th().dim)),
+                Span::styled(
+                    truncate(&it.label, inner_w.saturating_sub(4)),
+                    if on {
+                        Style::new()
+                            .fg(th().ink)
+                            .bg(th().yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::new().fg(th().fg)
+                    },
+                ),
+            ])
+        })
+        .collect();
+    lines.push(Line::from(Span::styled(
+        "─".repeat(inner_w),
+        Style::new().fg(th().bg2),
+    )));
+    if let Some(it) = items.get(cursor) {
+        let total = it.text.lines().count();
+        for l in it.text.lines().take(PREVIEW) {
+            lines.push(Line::from(Span::styled(
+                truncate(&format!(" {l}"), inner_w),
+                Style::new().fg(th().aqua),
+            )));
+        }
+        if total > PREVIEW {
+            lines.push(Line::from(Span::styled(
+                format!(" … {} more", total - PREVIEW),
+                Style::new().fg(th().dim),
+            )));
+        }
+    }
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(lines).block(popup("copy · enter or 1-9 copies · click · esc")),
+        rect,
+    );
 }

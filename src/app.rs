@@ -133,6 +133,33 @@ pub enum Row {
     Loose(usize),
 }
 
+/// Text being (or just) selected with the mouse inside one pane; cells are
+/// (row, col) on its screen as shown.
+#[derive(Clone, Debug)]
+pub struct Selection {
+    pub address: String,
+    pub rect: Rect,
+    pub start: (u16, u16),
+    pub end: (u16, u16),
+    pub dragging: bool,
+}
+
+impl Selection {
+    /// (first, last) cell in reading order.
+    pub fn ordered(&self) -> ((u16, u16), (u16, u16)) {
+        if self.start <= self.end {
+            (self.start, self.end)
+        } else {
+            (self.end, self.start)
+        }
+    }
+
+    pub fn covers(&self, row: u16, col: u16) -> bool {
+        let (a, b) = self.ordered();
+        (row, col) >= a && (row, col) <= b
+    }
+}
+
 pub struct Pane {
     pub channel: u32,
     pub parser: vt100::Parser,
@@ -155,6 +182,13 @@ pub enum Confirm {
     CloseWorkspace(Option<String>, String),
 }
 
+/// One thing the copy picker offers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CopyItem {
+    pub label: String,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
     Normal,
@@ -170,6 +204,10 @@ pub enum Mode {
     Prompt(Prompt, String),
     Confirm(Confirm),
     Settings {
+        cursor: usize,
+    },
+    Copy {
+        items: Vec<CopyItem>,
         cursor: usize,
     },
 }
@@ -200,11 +238,15 @@ pub struct App {
     pub mouse: bool,
     /// A divider being dragged and where the pointer is along its axis.
     pub drag: Option<(layout::Divider, u16)>,
+    pub selection: Option<Selection>,
     /// Sidebar rows on screen and the list's scroll offset, as last drawn.
     pub sidebar_view: std::cell::Cell<(Rect, usize)>,
     /// Where the settings popup was drawn, for clicks.
     pub settings_view: std::cell::Cell<Rect>,
     pub settings: Settings,
+    /// Where the copy picker and the status line's copy chip were drawn.
+    pub copy_view: std::cell::Cell<Rect>,
+    pub copy_chip: std::cell::Cell<Rect>,
     /// The start of a mouse report whose rest has not arrived yet.
     pending: Vec<u8>,
     refresh_due: Option<Instant>,
@@ -249,9 +291,12 @@ impl App {
             picker_cursor: 0,
             mouse: true,
             drag: None,
+            selection: None,
             sidebar_view: std::cell::Cell::new((Rect::default(), 0)),
             settings_view: std::cell::Cell::new(Rect::default()),
             settings: Settings::default(),
+            copy_view: std::cell::Cell::new(Rect::default()),
+            copy_chip: std::cell::Cell::new(Rect::default()),
             pending: Vec::new(),
             refresh_due: None,
             doc_errors: Vec::new(),
@@ -705,10 +750,213 @@ impl App {
         if let Some(p) = self.panes.get_mut(&f)
             && p.ended.is_none()
         {
+            self.selection = None;
             // Typing brings a scrolled-back pane to the bottom again.
             p.parser.screen_mut().set_scrollback(0);
             self.predict.typed(bytes, p.parser.screen());
             self.conn.send(p.channel, hc::DATA, bytes);
+        }
+    }
+
+    // ----- copy -----------------------------------------------------------
+
+    /// Opens the copy picker for the focused Claude pane, or (`newest`) copies
+    /// the newest code block straight away.
+    pub fn open_copy(&mut self, newest: bool) {
+        let items = match self.copy_items() {
+            Ok(items) if !items.is_empty() => items,
+            Ok(_) => return self.say("nothing to copy yet: Claude hasn't replied in this session"),
+            Err(e) => return self.say(e),
+        };
+        if newest {
+            self.copy_out(&items[0]);
+        } else {
+            self.mode = Mode::Copy { items, cursor: 0 };
+        }
+    }
+
+    /// Code blocks of the last replies (newest first), then the whole last reply.
+    fn copy_items(&mut self) -> Result<Vec<CopyItem>, String> {
+        let focused = self.focused().ok_or("no pane is focused")?;
+        let term = self.term(&focused).cloned().ok_or("no terminal here")?;
+        if term.app != "claude-code" {
+            return Err(
+                "ctrl+b y copies from Claude panes; elsewhere drag with the mouse to select".into(),
+            );
+        }
+        let tail = self.transcript_tail(&term)?;
+        let replies = crate::copy::replies(&tail);
+        let mut items = Vec::new();
+        for reply in replies.iter().rev().take(6) {
+            for b in crate::copy::code_blocks(reply).into_iter().rev() {
+                let first = b.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                let n = b.text.lines().count();
+                let lang = if b.lang.is_empty() { "text" } else { &b.lang };
+                items.push(CopyItem {
+                    label: format!(
+                        "[{lang}] {} · {n} line{}",
+                        first.trim(),
+                        if n == 1 { "" } else { "s" }
+                    ),
+                    text: b.text,
+                });
+            }
+        }
+        items.truncate(20);
+        if let Some(last) = replies.last() {
+            items.push(CopyItem {
+                label: format!("whole last reply · {} lines", last.lines().count()),
+                text: last.clone(),
+            });
+        }
+        Ok(items)
+    }
+
+    /// The transcript (its end, for other machines) of `term`'s Claude session, on whatever
+    /// machine it runs. With several sessions in one folder, the one whose
+    /// title matches the terminal's wins, else the newest.
+    fn transcript_tail(&mut self, term: &Term) -> Result<String, String> {
+        // Remote transcripts: only their end comes over the link. Local: all of it.
+        const LINES: usize = 2000;
+        let slug = crate::copy::slug(&term.cwd);
+        let marker = serde_json::to_string(&term.title)
+            .map(|t| format!("\"aiTitle\":{t}"))
+            .unwrap_or_default();
+        let matches = |text: &str| term.title.is_empty() || text.contains(&marker);
+        let mut first: Option<String> = None;
+        match &term.on {
+            None => {
+                let home = std::env::var_os("USERPROFILE")
+                    .or_else(|| std::env::var_os("HOME"))
+                    .ok_or("no home folder")?;
+                let dir = std::path::Path::new(&home)
+                    .join(".claude")
+                    .join("projects")
+                    .join(&slug);
+                let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> =
+                    std::fs::read_dir(&dir)
+                        .map_err(|_| format!("no Claude sessions in {}", dir.display()))?
+                        .flatten()
+                        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+                        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+                        .collect();
+                files.sort_by_key(|f| std::cmp::Reverse(f.0));
+                for (_, path) in files.iter().take(5) {
+                    let Ok(text) = std::fs::read_to_string(path) else {
+                        continue;
+                    };
+                    if matches(&text) {
+                        return Ok(text);
+                    }
+                    first.get_or_insert(text);
+                }
+            }
+            Some(machine) => {
+                let argv = if crate::copy::is_windows_path(&term.cwd) {
+                    vec![
+                        "powershell".to_string(),
+                        "-NoProfile".into(),
+                        "-NonInteractive".into(),
+                        "-Command".into(),
+                        format!(
+                            "Get-ChildItem -LiteralPath (Join-Path $HOME '.claude\\projects\\{slug}') -Filter *.jsonl | Sort-Object LastWriteTime -Descending | Select-Object -First 5 -ExpandProperty FullName"
+                        ),
+                    ]
+                } else {
+                    vec![
+                        "sh".to_string(),
+                        "-c".into(),
+                        format!(
+                            "ls -t \"$HOME/.claude/projects/{slug}\"/*.jsonl 2>/dev/null | head -5"
+                        ),
+                    ]
+                };
+                let r = self
+                    .conn
+                    .call(
+                        "machine.exec",
+                        json!({"argv": argv, "on": machine, "timeout": 20}),
+                    )
+                    .map_err(|e| format!("{e:#}"))?;
+                let out = crate::copy::b64decode(r["stdout"].as_str().unwrap_or(""));
+                let out = String::from_utf8_lossy(&out).to_string();
+                for path in out.lines().map(str::trim).filter(|p| !p.is_empty()) {
+                    let count = self
+                        .conn
+                        .call(
+                            "file.read",
+                            json!({"path": path, "on": machine, "limit": 0}),
+                        )
+                        .map_err(|e| format!("{e:#}"))?;
+                    let lines = count["lines"].as_u64().unwrap_or(0) as usize;
+                    let offset = lines.saturating_sub(LINES).max(1);
+                    let r = self
+                        .conn
+                        .call(
+                            "file.read",
+                            json!({"path": path, "on": machine, "offset": offset, "limit": LINES}),
+                        )
+                        .map_err(|e| format!("{e:#}"))?;
+                    let text = r["text"].as_str().unwrap_or("").to_string();
+                    if matches(&text) {
+                        return Ok(text);
+                    }
+                    first.get_or_insert(text);
+                }
+            }
+        }
+        first.ok_or_else(|| format!("no Claude session found for {}", term.cwd))
+    }
+
+    fn copy_out(&mut self, item: &CopyItem) {
+        match crate::copy::to_clipboard(&item.text) {
+            Ok(()) => {
+                let n = item.text.lines().count();
+                self.say(format!("copied {n} line{}", if n == 1 { "" } else { "s" }));
+            }
+            Err(e) => self.say(format!("copy failed: {e}")),
+        }
+    }
+
+    fn copy_key(&mut self, items: Vec<CopyItem>, cursor: usize, key: Key) {
+        let n = items.len();
+        let pick = match key {
+            Key::Char('j') | Key::Down | Key::Tab => {
+                self.mode = Mode::Copy {
+                    items,
+                    cursor: (cursor + 1) % n,
+                };
+                return;
+            }
+            Key::Char('k') | Key::Up | Key::BackTab => {
+                self.mode = Mode::Copy {
+                    items,
+                    cursor: (cursor + n - 1) % n,
+                };
+                return;
+            }
+            Key::Enter | Key::Char('y') | Key::Char(' ') => Some(cursor),
+            Key::Char(d @ '1'..='9') => Some(d as usize - '1' as usize).filter(|&i| i < n),
+            _ => None,
+        };
+        self.mode = Mode::Normal;
+        if let Some(i) = pick {
+            self.copy_out(&items[i]);
+        }
+    }
+
+    /// A click on a picker row copies it; outside closes the picker.
+    fn copy_click(&mut self, m: keys::Mouse) {
+        let Mode::Copy { items, .. } = self.mode.clone() else {
+            return;
+        };
+        let r = self.copy_view.get();
+        self.mode = Mode::Normal;
+        if !contains(r, m.x, m.y) || m.y == r.y {
+            return;
+        }
+        if let Some(item) = items.get((m.y - r.y - 1) as usize) {
+            self.copy_out(item);
         }
     }
 
@@ -831,6 +1079,12 @@ impl App {
                 }
                 return;
             }
+            Mode::Copy { .. } => {
+                if m.left_press() {
+                    self.copy_click(m);
+                }
+                return;
+            }
             Mode::Settings { .. } => {
                 if m.left_press() {
                     self.settings_click(m);
@@ -845,6 +1099,13 @@ impl App {
             }
             Mode::Navigate | Mode::Normal => {}
         }
+        if self.selection.as_ref().is_some_and(|s| s.dragging) {
+            self.select_drag(m);
+            return;
+        }
+        if m.left_press() {
+            self.selection = None;
+        }
         if let Some((d, _)) = self.drag.clone() {
             let along = if d.vertical { m.x } else { m.y };
             if m.release {
@@ -853,6 +1114,10 @@ impl App {
             } else if m.motion() {
                 self.drag = Some((d, along));
             }
+            return;
+        }
+        if m.left_press() && contains(self.copy_chip.get(), m.x, m.y) {
+            self.open_copy(false);
             return;
         }
         let (side, _) = self.sidebar_view.get();
@@ -919,6 +1184,17 @@ impl App {
             }
             return;
         }
+        if m.left_press() {
+            // A drag from here selects text (shift+drag still uses the terminal's own).
+            self.selection = Some(Selection {
+                address: address.to_string(),
+                rect,
+                start: (row, col),
+                end: (row, col),
+                dragging: true,
+            });
+            return;
+        }
         let Some(up) = m.wheel() else { return };
         if screen.alternate_screen() {
             if agent {
@@ -937,6 +1213,45 @@ impl App {
         let now = screen.scrollback();
         let next = if up { now + 3 } else { now.saturating_sub(3) };
         p.parser.screen_mut().set_scrollback(next);
+    }
+
+    /// A drag that started in a pane: follow it (kept inside that pane) and,
+    /// on release, copy what it covers. Lines the screen only wrapped are joined.
+    fn select_drag(&mut self, m: keys::Mouse) {
+        let Some(sel) = self.selection.as_mut() else {
+            return;
+        };
+        let r = sel.rect;
+        let col = m.x.clamp(r.x, r.x + r.width.saturating_sub(1)) - r.x;
+        let row = m.y.clamp(r.y, r.y + r.height.saturating_sub(1)) - r.y;
+        sel.end = (row, col);
+        if !m.release {
+            return;
+        }
+        sel.dragging = false;
+        if sel.start == sel.end {
+            self.selection = None;
+            return;
+        }
+        let (a, b) = sel.ordered();
+        let address = sel.address.clone();
+        let Some(p) = self.panes.get(&address) else {
+            return;
+        };
+        let text = p.parser.screen().contents_between(a.0, a.1, b.0, b.1 + 1);
+        let text = text
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if text.trim().is_empty() {
+            self.selection = None;
+            return;
+        }
+        self.copy_out(&CopyItem {
+            label: String::new(),
+            text,
+        });
     }
 
     fn sidebar_click(&mut self, row: usize) {
@@ -1004,6 +1319,7 @@ impl App {
             Mode::Help => self.mode = Mode::Normal,
             Mode::Prompt(kind, text) => self.prompt_key(kind, text, key),
             Mode::Settings { cursor } => self.settings_key(cursor, key),
+            Mode::Copy { items, cursor } => self.copy_key(items, cursor, key),
             Mode::Confirm(what) => {
                 self.mode = Mode::Normal;
                 if matches!(key, Key::Char('y' | 'Y') | Key::Enter) {
@@ -1107,6 +1423,8 @@ impl App {
             ToggleSidebar => self.sidebar = !self.sidebar,
             Help => self.mode = Mode::Help,
             OpenSettings => self.open_settings(),
+            CopyPicker => self.open_copy(false),
+            CopyLast => self.open_copy(true),
             TogglePredict => {
                 self.predict.enabled = !self.predict.enabled;
                 self.settings.predict = self.predict.enabled;
@@ -1909,4 +2227,27 @@ impl App {
 
 fn contains(r: Rect, x: u16, y: u16) -> bool {
     x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_joins_wrapped_rows() {
+        let mut p = vt100::Parser::new(nz(5), nz(10), 0);
+        p.process(b"abcdefghijklmno\r\nxyz");
+        let sel = Selection {
+            address: "t1".into(),
+            rect: Rect::new(0, 0, 10, 5),
+            start: (2, 2),
+            end: (0, 0),
+            dragging: false,
+        };
+        let (a, b) = sel.ordered();
+        assert_eq!((a, b), ((0, 0), (2, 2)));
+        assert!(sel.covers(1, 9) && !sel.covers(2, 3));
+        let text = p.screen().contents_between(a.0, a.1, b.0, b.1 + 1);
+        assert_eq!(text, "abcdefghijklmno\nxyz");
+    }
 }

@@ -2,6 +2,7 @@
 //! sidebar, herdr's default keys, every machine `hc` knows, and predictive echo.
 
 mod app;
+mod copy;
 mod hc;
 mod keys;
 mod layout;
@@ -164,6 +165,14 @@ fn snapshot(size: Option<&str>) -> Result<()> {
         std::thread::sleep(Duration::from_millis(50));
         while let Ok(msg) = rx.try_recv() {
             app.incoming(msg);
+        }
+    }
+    if let Some(t) = std::env::args().find_map(|a| a.strip_prefix("copy=").map(str::to_string)) {
+        app.goto(&t);
+        app.relayout();
+        app.open_copy(std::env::args().any(|a| a == "now"));
+        if let Some((msg, _)) = &app.message {
+            println!("message: {msg}");
         }
     }
     terminal.draw(|f| ui::draw(f, &app))?;

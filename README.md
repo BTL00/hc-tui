@@ -47,6 +47,13 @@ with predictive local echo for laggy links.
   resize, wheel to scroll a pane's history (typing jumps back down). Programs that use the mouse themselves
   (editors, htop) get the clicks and the wheel. `ctrl+b m` or `--no-mouse` turns it off so you can select
   text the usual way; in Windows Terminal, shift+drag selects even with the mouse on.
+- **Copy exactly what Claude wrote.** Claude Code wraps long lines with real line breaks, so copying from the
+  screen breaks code. `ctrl+b y` (or the `copy code` chip in the status line) lists the code blocks from
+  Claude's last replies, read from its own transcript (`~/.claude/projects/...`, on whichever machine the
+  pane runs), newest first with a preview; Enter or a click copies the exact text. `ctrl+b Y` copies the
+  newest block at once. The clipboard is set with OSC 52, so it works over SSH too, and natively on Windows.
+  Anywhere else, drag with the mouse to select inside one pane: it is copied on release, and lines the
+  screen merely wrapped come out joined.
 - **Themes and settings.** `ctrl+b ,` opens settings: theme (Gruvbox Dark, Monokai, Dracula, Tokyo Night,
   Catppuccin Mocha, One Dark, Nord, Solarized Dark, or Terminal for your terminal's own colours), the gap
   between sidebar and panes, mouse, predictive echo and sidebar width. Changes show at once and are saved
@@ -96,6 +103,7 @@ hc-tui --no-mouse           # mouse off (select text natively)
 | `prefix g` | goto picker: `/` search, `b w i d a` filters, Enter |
 | `prefix a` | jump to the next agent waiting for you |
 | `prefix b` | toggle the sidebar |
+| `prefix y` / `Y` | copy a code block Claude wrote: pick one / the newest |
 | `prefix ,` | settings (theme, gap, mouse, echo, sidebar width) |
 | `prefix m` | toggle the mouse |
 | `prefix e` | toggle predictive echo |
