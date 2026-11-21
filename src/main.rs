@@ -135,7 +135,7 @@ fn list() -> Result<()> {
     }
     for row in &app.rows {
         match row {
-            app::Row::Machine(name, state) => println!("◆ {name} ({state})"),
+            app::Row::Machine(name, state) => println!("💻 {name} ({state})"),
             app::Row::Space(si) => println!("  {}", app.spaces[*si].label()),
             app::Row::Tab(si, ti) => {
                 let t = &app.spaces[*si].tabs[*ti];
@@ -162,6 +162,7 @@ fn list() -> Result<()> {
                 };
                 println!("    {name}: {}", terms.join(", "));
             }
+            app::Row::Pane(..) => {}
             app::Row::LooseHeader => println!("  (unplaced)"),
             app::Row::Loose(i) => {
                 let x = &app.terms[*i];

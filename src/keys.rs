@@ -160,6 +160,7 @@ pub enum Action {
     ToggleSidebar,
     Help,
     TogglePredict,
+    NextWaiting,
     SendPrefix,
     Cancel,
 }
@@ -197,6 +198,7 @@ pub fn prefix_action(key: Key) -> Option<Action> {
         Key::Char('b') => ToggleSidebar,
         Key::Char('?') => Help,
         Key::Char('e') => TogglePredict,
+        Key::Char('a') => NextWaiting,
         Key::Ctrl('b') => SendPrefix,
         Key::Esc | Key::Ctrl('[') | Key::Ctrl('c') => Cancel,
         _ => return None,
@@ -219,6 +221,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("prefix N / W / D", "new / rename / close workspace"),
     ("prefix w", "workspace navigation (sidebar)"),
     ("prefix g", "goto picker  (/ search, b w i d a filter)"),
+    ("prefix a", "jump to the next agent waiting for you"),
     ("prefix b", "toggle sidebar"),
     ("prefix e", "toggle predictive echo"),
     ("prefix q", "detach (everything keeps running)"),

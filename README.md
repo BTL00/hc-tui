@@ -10,16 +10,19 @@ with predictive local echo for laggy links.
 
 ```
 ┌ hc-tui ──────────────────────┐┌──────────────────────────────┬─────────────────────┐
-│◆ laptop                      ││ $ cargo test                 │ ● claude            │
-│ api                          ││ running 9 tests              │ > review the diff   │
-│ ▌● review ⊞2 claude          ││ test result: ok              │                     │
-│  ○ docs claude               │├──────────────────────────────┴─────────────────────┤
-│◆ vps connected               ││ PS C:\Users\me\app> npm run dev                    │
+│💻 laptop              this pc││ $ cargo test                 │ ● claude            │
+│ api                 1 waiting││ running 9 tests              │ > review the diff   │
+│ ▌● tab 1                     ││ test result: ok              │                     │
+│   ├ ● review           claude││                              │                     │
+│   └ ○ pwsh                   │├──────────────────────────────┴─────────────────────┤
+│  ✓ docs             your turn││ PS C:\Users\me\app> npm run dev                    │
+│💻 vps               connected││                                                    │
 │ shop                         ││                                                    │
-│  ▲ checkout claude           ││                                                    │
+│  ▲ checkout         needs you││                                                    │
 └──────────────────────────────┘└────────────────────────────────────────────────────┘
- PREFIX  api › review  t5 ~/src/api                                    echo⚡ ctrl+b ? help
+ PREFIX  api › tab 1  t5 ~/src/api               2 waiting · ctrl+b a  echo⚡ ctrl+b ? help
 ```
+
 
 ## What it does
 
@@ -32,8 +35,12 @@ with predictive local echo for laggy links.
   `g` goto, `b` sidebar, `q` detach. `ctrl+b ?` lists them all.
 - **Every machine.** Machines added with `hc machine add` show up in the sidebar with their own workspaces;
   their terminals are attached through your local core.
-- **Agent status.** Each tab shows its busiest terminal: `▲` blocked, `●` working, `✓` done, `○` idle.
+- **Tree.** Machines (💻) → workspaces → tabs → panes; a tab with splits lists its panes, Enter on one focuses it.
+- **Agent status.** Each tab and pane shows its state: `▲` blocked, `●` working, `✓` done, `○` idle.
   The goto picker (`ctrl+b g`) searches everything and filters with `b w i d a`, like herdr's.
+- **Waiting for you.** An agent that finished its turn, got blocked or failed while you were looking elsewhere
+  is highlighted (`your turn`, `needs you`), counted on its workspace and in the status line;
+  `ctrl+b a` jumps to the next one. Focusing the pane clears it.
 - **Predictive echo.** Printable keys show up immediately (underlined) and are reconciled with the
   program's real echo, mosh-style. Toggle with `ctrl+b e`, or start with `--no-predict`.
 - **Unplaced terminals.** Terminals started with `hc run` that no layout shows are listed at the bottom
@@ -77,6 +84,7 @@ hc-tui --no-predict         # predictive echo off
 | `prefix N` / `W` / `D` | new / rename / close workspace |
 | `prefix w` | workspace navigation: `j/k`, `←/→` between workspaces, Enter, Esc |
 | `prefix g` | goto picker: `/` search, `b w i d a` filters, Enter |
+| `prefix a` | jump to the next agent waiting for you |
 | `prefix b` | toggle the sidebar |
 | `prefix e` | toggle predictive echo |
 | `prefix q` | detach; everything keeps running |

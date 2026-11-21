@@ -9,7 +9,7 @@ use crate::predict::Predictor;
 use anyhow::Result;
 use ratatui::layout::Rect;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 pub fn nz(n: u16) -> std::num::NonZeroU16 {
@@ -122,6 +122,8 @@ pub enum Row {
     Machine(String, String),
     Space(usize),
     Tab(usize, usize),
+    /// (space, tab, index into the tab's terminals); only for tabs with splits.
+    Pane(usize, usize, usize),
     LooseHeader,
     Loose(usize),
 }
@@ -188,6 +190,14 @@ pub struct App {
     pub picker_cursor: usize,
     refresh_due: Option<Instant>,
     doc_errors: Vec<String>,
+    /// Terminals that stopped (turn done, blocked, error) since you last looked.
+    attention: HashSet<String>,
+    last_status: HashMap<String, String>,
+}
+
+/// States where the program has stopped and wants something from you.
+pub fn wants_you(status: &str) -> bool {
+    matches!(status, "done" | "blocked" | "error")
 }
 
 impl App {
@@ -220,7 +230,48 @@ impl App {
             picker_cursor: 0,
             refresh_due: None,
             doc_errors: Vec::new(),
+            attention: HashSet::new(),
+            last_status: HashMap::new(),
         }
+    }
+
+    /// Stopped and not looked at since: it is waiting for your input.
+    pub fn waiting(&self, address: &str) -> bool {
+        self.attention.contains(address)
+    }
+
+    /// Waiting terminals in sidebar order (placed ones first, then unplaced).
+    pub fn waiting_list(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let placed = self
+            .spaces
+            .iter()
+            .flat_map(|s| s.tabs.iter().flat_map(|t| t.terminals.iter()));
+        let loose = self.loose.iter().map(|&i| &self.terms[i].address);
+        for a in placed.chain(loose) {
+            if self.waiting(a) && !out.contains(a) {
+                out.push(a.clone());
+            }
+        }
+        out
+    }
+
+    /// Marks terminals that just stopped, unless you are looking at them.
+    fn track_attention(&mut self) {
+        let focused = self.focused();
+        let mut seen = HashMap::new();
+        for t in &self.terms {
+            let before = self.last_status.get(&t.address);
+            let changed = before.is_none_or(|b| b != &t.status);
+            if !t.live || !wants_you(&t.status) {
+                self.attention.remove(&t.address);
+            } else if changed && focused.as_deref() != Some(t.address.as_str()) {
+                self.attention.insert(t.address.clone());
+            }
+            seen.insert(t.address.clone(), t.status.clone());
+        }
+        self.attention.retain(|a| seen.contains_key(a));
+        self.last_status = seen;
     }
 
     pub fn say(&mut self, msg: impl Into<String>) {
@@ -365,32 +416,33 @@ impl App {
                         .any(|s| s.tabs.iter().any(|tab| tab.terminals.contains(&t.address)))
             })
             .collect();
+        self.track_attention();
         self.rebuild_rows();
         true
     }
 
     fn rebuild_rows(&mut self) {
         let mut rows = Vec::new();
-        let many = !self.machines.is_empty();
         let mut machines: Vec<Option<String>> = vec![None];
         machines.extend(self.machines.iter().map(|(n, _)| Some(n.clone())));
         for on in machines {
-            if many {
-                let state = match &on {
-                    None => "local".to_string(),
-                    Some(n) => self
-                        .machines
-                        .iter()
-                        .find(|(m, _)| m == n)
-                        .map(|(_, s)| s.clone())
-                        .unwrap_or_default(),
-                };
-                rows.push(Row::Machine(self.machine_name(&on), state));
-            }
+            let state = match &on {
+                None => "local".to_string(),
+                Some(n) => self
+                    .machines
+                    .iter()
+                    .find(|(m, _)| m == n)
+                    .map(|(_, s)| s.clone())
+                    .unwrap_or_default(),
+            };
+            rows.push(Row::Machine(self.machine_name(&on), state));
             for (si, s) in self.spaces.iter().enumerate().filter(|(_, s)| s.on == on) {
                 rows.push(Row::Space(si));
-                for ti in 0..s.tabs.len() {
+                for (ti, t) in s.tabs.iter().enumerate() {
                     rows.push(Row::Tab(si, ti));
+                    if t.terminals.len() > 1 {
+                        rows.extend((0..t.terminals.len()).map(|pi| Row::Pane(si, ti, pi)));
+                    }
                 }
             }
         }
@@ -428,6 +480,7 @@ impl App {
         if let Some(c) = &self.current {
             self.focus.insert(Self::tab_key(c), address.to_string());
         }
+        self.attention.remove(address);
         self.predict.clear();
     }
 
@@ -498,11 +551,13 @@ impl App {
         {
             self.set_focus(&a);
         }
-        if let Some(f) = self.focused()
-            && let Some(p) = self.panes.get(&f)
-            && p.ended.is_none()
-        {
-            self.conn.send(p.channel, hc::FOCUS, &[1]);
+        if let Some(f) = self.focused() {
+            self.attention.remove(&f);
+            if let Some(p) = self.panes.get(&f)
+                && p.ended.is_none()
+            {
+                self.conn.send(p.channel, hc::FOCUS, &[1]);
+            }
         }
     }
 
@@ -729,6 +784,20 @@ impl App {
                     "predictive echo off"
                 });
             }
+            NextWaiting => {
+                let list = self.waiting_list();
+                match list.first() {
+                    Some(a) => {
+                        let a = a.clone();
+                        let left = list.len() - 1;
+                        self.reveal(&a);
+                        if left > 0 {
+                            self.say(format!("{left} more waiting · ctrl+b a"));
+                        }
+                    }
+                    None => self.say("nobody is waiting for you"),
+                }
+            }
             SendPrefix => self.forward(&[0x02]),
             Cancel => {}
         }
@@ -745,12 +814,22 @@ impl App {
 
     fn current_row(&self) -> Option<usize> {
         let c = self.current.as_ref()?;
-        self.rows.iter().position(|row| match row {
-            Row::Tab(si, ti) => {
-                let s = &self.spaces[*si];
-                s.on == c.on && s.id == c.space && s.tabs[*ti].id == c.tab
+        let focused = self.focused();
+        let in_current = |si: usize, ti: usize| {
+            let s = &self.spaces[si];
+            s.on == c.on && s.id == c.space && s.tabs[ti].id == c.tab
+        };
+        let pane = self.rows.iter().position(|row| match row {
+            Row::Pane(si, ti, pi) => {
+                in_current(*si, *ti)
+                    && focused.as_ref() == self.spaces[*si].tabs[*ti].terminals.get(*pi)
             }
             _ => false,
+        });
+        pane.or_else(|| {
+            self.rows
+                .iter()
+                .position(|row| matches!(row, Row::Tab(si, ti) if in_current(*si, *ti)))
         })
     }
 
@@ -1118,7 +1197,7 @@ impl App {
     }
 
     fn navigate_key(&mut self, key: Key) {
-        let selectable = |r: &Row| matches!(r, Row::Tab(..) | Row::Loose(_));
+        let selectable = |r: &Row| matches!(r, Row::Tab(..) | Row::Pane(..) | Row::Loose(_));
         let step = |app: &App, from: usize, down: bool| -> usize {
             let mut i = from;
             loop {
@@ -1148,7 +1227,7 @@ impl App {
                 // First tab of the previous/next workspace, no wrapping.
                 let forward = matches!(key, Key::Right | Key::Char('l'));
                 let space_of = |r: &Row| match r {
-                    Row::Tab(si, _) => Some(*si),
+                    Row::Tab(si, _) | Row::Pane(si, _, _) => Some(*si),
                     _ => None,
                 };
                 let here = self.rows.get(self.nav_cursor).and_then(space_of);
@@ -1183,6 +1262,11 @@ impl App {
                             tab: s.tabs[ti].id.clone(),
                         };
                         self.activate(r);
+                    }
+                    Some(Row::Pane(si, ti, pi)) => {
+                        if let Some(a) = self.spaces[si].tabs[ti].terminals.get(pi).cloned() {
+                            self.reveal(&a);
+                        }
                     }
                     Some(Row::Loose(i)) => self.adopt(i),
                     _ => {}

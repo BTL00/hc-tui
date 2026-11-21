@@ -21,6 +21,8 @@ const GREEN: Color = Color::Rgb(0xb8, 0xbb, 0x26);
 const BLUE: Color = Color::Rgb(0x83, 0xa5, 0x98);
 const AQUA: Color = Color::Rgb(0x8e, 0xc0, 0x7c);
 const ORANGE: Color = Color::Rgb(0xfe, 0x80, 0x19);
+/// Row background for an agent waiting for you (dark gruvbox yellow).
+const WAIT_BG: Color = Color::Rgb(0x4a, 0x3b, 0x12);
 
 /// (sidebar, tab area, status line).
 pub fn areas(app: &App, area: Rect) -> (Option<Rect>, Rect, Rect) {
@@ -89,6 +91,46 @@ fn truncate(s: &str, width: usize) -> String {
     out
 }
 
+/// Right-hand tag for a terminal that stopped and waits for you.
+fn wait_tag(status: &str) -> Span<'static> {
+    let (text, color) = match status {
+        "blocked" => ("needs you", RED),
+        "error" => ("error", RED),
+        _ => ("your turn", YELLOW),
+    };
+    Span::styled(text, Style::new().fg(color).add_modifier(Modifier::BOLD))
+}
+
+/// Right-hand tag naming the agent (`claude`, `codex`...), if hc detected one.
+fn app_tag(term: Option<&crate::app::Term>) -> Span<'static> {
+    let name = term.map(|x| x.app.replace("-code", "")).unwrap_or_default();
+    Span::styled(name, Style::new().fg(DIM))
+}
+
+/// `prefix` + `name` (truncated) + padding + `tag` flush right, in `width` columns.
+fn fitted<'a>(
+    mut spans: Vec<Span<'a>>,
+    name: &str,
+    name_style: Style,
+    tag: Span<'a>,
+    width: usize,
+) -> Line<'a> {
+    use unicode_width::UnicodeWidthStr;
+    let used: usize = spans.iter().map(|s| s.content.width()).sum();
+    let tag_w = tag.content.width();
+    let gap = usize::from(tag_w > 0);
+    let room = width.saturating_sub(used + tag_w + gap);
+    let mut name = truncate(name, room);
+    if name.width() > room {
+        name = truncate(&name, room.saturating_sub(1));
+    }
+    let pad = width.saturating_sub(used + name.width() + tag_w);
+    spans.push(Span::styled(name, name_style));
+    spans.push(Span::raw(" ".repeat(pad)));
+    spans.push(tag);
+    Line::from(spans)
+}
+
 fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let navigating = app.mode == Mode::Navigate;
     let inner_w = area.width.saturating_sub(2) as usize;
@@ -106,19 +148,22 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                     "connecting" => YELLOW,
                     _ => RED,
                 };
+                let up = matches!(state.as_str(), "connected" | "local");
                 let note = if state == "local" {
-                    String::new()
+                    Span::styled("this pc", Style::new().fg(DIM))
                 } else {
-                    format!(" {state}")
+                    Span::styled(state.clone(), Style::new().fg(color))
                 };
-                ListItem::new(Line::from(vec![
-                    Span::styled("◆ ", Style::new().fg(color)),
-                    Span::styled(
-                        truncate(name, inner_w.saturating_sub(4 + note.len())),
-                        Style::new().fg(FG).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(note, Style::new().fg(DIM)),
-                ]))
+                // 💻 is two columns wide; `fitted` measures it that way.
+                ListItem::new(fitted(
+                    vec![Span::raw("💻 ")],
+                    name,
+                    Style::new()
+                        .fg(if up { FG } else { DIM })
+                        .add_modifier(Modifier::BOLD),
+                    note,
+                    inner_w,
+                ))
             }
             Row::Space(si) => {
                 let s = &app.spaces[*si];
@@ -128,10 +173,28 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 let style = Style::new()
                     .fg(if is_current { ORANGE } else { DIM })
                     .add_modifier(Modifier::BOLD);
-                ListItem::new(Line::from(Span::styled(
-                    format!(" {}", truncate(&s.label(), inner_w.saturating_sub(2))),
+                let mut waiting: Vec<&String> = s
+                    .tabs
+                    .iter()
+                    .flat_map(|t| t.terminals.iter())
+                    .filter(|a| app.waiting(a))
+                    .collect();
+                waiting.dedup();
+                let tag = if waiting.is_empty() {
+                    Span::raw("")
+                } else {
+                    Span::styled(
+                        format!("{} waiting", waiting.len()),
+                        Style::new().fg(YELLOW).add_modifier(Modifier::BOLD),
+                    )
+                };
+                ListItem::new(fitted(
+                    vec![Span::raw(" ")],
+                    &s.label(),
                     style,
-                )))
+                    tag,
+                    inner_w,
+                ))
             }
             Row::Tab(si, ti) => {
                 let s = &app.spaces[*si];
@@ -151,9 +214,12 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 let (glyph, color) = worst
                     .map(|x| status_style(&x.status, x.live))
                     .unwrap_or(("·", DIM));
+                let split = t.terminals.len() > 1;
                 let shown = if is_current { focused.clone() } else { None };
                 let name = if !t.name.is_empty() {
                     t.name.clone()
+                } else if split {
+                    format!("tab {}", ti + 1)
                 } else {
                     shown
                         .as_deref()
@@ -162,33 +228,90 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                         .map(|x| x.display())
                         .unwrap_or_else(|| format!("tab {}", ti + 1))
                 };
-                let extra = if t.terminals.len() > 1 {
-                    format!(" ⊞{}", t.terminals.len())
-                } else {
-                    String::new()
+                // Waiting panes of a split tab get their own rows below.
+                let waiting = t
+                    .terminals
+                    .iter()
+                    .filter(|a| app.waiting(a))
+                    .filter_map(|a| app.term(a))
+                    .max_by_key(|x| rank(&x.status));
+                let mut name_style = Style::new().fg(FG);
+                if is_current {
+                    name_style = name_style.add_modifier(Modifier::BOLD);
+                }
+                let tag = match (waiting, split) {
+                    (Some(w), false) => wait_tag(&w.status),
+                    (Some(_), true) => {
+                        Span::styled("▾", Style::new().fg(YELLOW).add_modifier(Modifier::BOLD))
+                    }
+                    (None, _) => app_tag(worst),
                 };
-                let app_tag = worst
-                    .map(|x| x.app.replace("-code", ""))
-                    .filter(|a| !a.is_empty())
-                    .map(|a| format!(" {a}"))
-                    .unwrap_or_default();
-                let room =
-                    inner_w.saturating_sub(5 + extra.chars().count() + app_tag.chars().count());
-                let name_style = if is_current {
+                let line = fitted(
+                    vec![
+                        Span::styled(
+                            if is_current { " ▌" } else { "  " },
+                            Style::new().fg(YELLOW),
+                        ),
+                        Span::styled(format!("{glyph} "), Style::new().fg(color)),
+                    ],
+                    &name,
+                    name_style,
+                    tag,
+                    inner_w,
+                );
+                let item = ListItem::new(line);
+                if waiting.is_some() {
+                    item.style(Style::new().bg(WAIT_BG))
+                } else {
+                    item
+                }
+            }
+            Row::Pane(si, ti, pi) => {
+                let s = &app.spaces[*si];
+                let t = &s.tabs[*ti];
+                let address = &t.terminals[*pi];
+                let is_current = current
+                    .as_ref()
+                    .is_some_and(|c| c.on == s.on && c.space == s.id && c.tab == t.id);
+                let is_focused = is_current && focused.as_ref() == Some(address);
+                if navigating && row_i == app.nav_cursor {
+                    selected = Some(row_i);
+                }
+                let term = app.term(address);
+                let (glyph, color) = term
+                    .map(|x| status_style(&x.status, x.live))
+                    .unwrap_or(("·", DIM));
+                let name = term.map(|x| x.display()).unwrap_or_else(|| address.clone());
+                let last = *pi + 1 == t.terminals.len();
+                let waiting = app.waiting(address);
+                let name_style = if is_focused {
                     Style::new().fg(FG).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::new().fg(FG)
+                    Style::new().fg(if is_current || waiting { FG } else { DIM })
                 };
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        if is_current { " ▌" } else { "  " },
-                        Style::new().fg(YELLOW),
-                    ),
-                    Span::styled(format!("{glyph} "), Style::new().fg(color)),
-                    Span::styled(truncate(&name, room), name_style),
-                    Span::styled(extra, Style::new().fg(AQUA)),
-                    Span::styled(app_tag, Style::new().fg(DIM)),
-                ]))
+                let tag = match term {
+                    Some(x) if waiting => wait_tag(&x.status),
+                    _ => app_tag(term),
+                };
+                let line = fitted(
+                    vec![
+                        Span::styled(
+                            if last { "   └ " } else { "   ├ " },
+                            Style::new().fg(if is_focused { YELLOW } else { BG2 }),
+                        ),
+                        Span::styled(format!("{glyph} "), Style::new().fg(color)),
+                    ],
+                    &name,
+                    name_style,
+                    tag,
+                    inner_w,
+                );
+                let item = ListItem::new(line);
+                if waiting {
+                    item.style(Style::new().bg(WAIT_BG))
+                } else {
+                    item
+                }
             }
             Row::LooseHeader => ListItem::new(Line::from(Span::styled(
                 " unplaced · enter adds a tab",
@@ -200,14 +323,27 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 }
                 let t = &app.terms[*i];
                 let (glyph, color) = status_style(&t.status, t.live);
-                ListItem::new(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(format!("{glyph} "), Style::new().fg(color)),
-                    Span::styled(
-                        truncate(&t.display(), inner_w.saturating_sub(6)),
-                        Style::new().fg(DIM),
-                    ),
-                ]))
+                let waiting = app.waiting(&t.address);
+                let line = fitted(
+                    vec![
+                        Span::raw("  "),
+                        Span::styled(format!("{glyph} "), Style::new().fg(color)),
+                    ],
+                    &t.display(),
+                    Style::new().fg(if waiting { FG } else { DIM }),
+                    if waiting {
+                        wait_tag(&t.status)
+                    } else {
+                        app_tag(Some(t))
+                    },
+                    inner_w,
+                );
+                let item = ListItem::new(line);
+                if waiting {
+                    item.style(Style::new().bg(WAIT_BG))
+                } else {
+                    item
+                }
             }
         })
         .collect();
@@ -235,7 +371,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|e| format!("layout unavailable: {e}"))
         .collect();
-    if app.rows.is_empty() {
+    if app.spaces.is_empty() && app.loose.is_empty() {
         notes.push("no workspaces yet · ctrl+b c".into());
     }
     if !notes.is_empty() {
@@ -449,13 +585,24 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     if let Some((msg, _)) = &app.message {
         spans.push(Span::styled(format!("  {msg}"), Style::new().fg(YELLOW)));
     }
+    let waiting = app.waiting_list().len();
+    let badge = if waiting > 0 {
+        format!(" {waiting} waiting · ctrl+b a ")
+    } else {
+        String::new()
+    };
     let right = format!(
-        "{}ctrl+b ? help ",
+        " {}ctrl+b ? help ",
         if app.predict.enabled { "echo⚡ " } else { "" }
     );
     let left_w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let pad = (area.width as usize).saturating_sub(left_w + right.chars().count());
+    let pad = (area.width as usize)
+        .saturating_sub(left_w + badge.chars().count() + right.chars().count());
     spans.push(Span::raw(" ".repeat(pad)));
+    spans.push(Span::styled(
+        badge,
+        Style::new().fg(BG).bg(YELLOW).add_modifier(Modifier::BOLD),
+    ));
     spans.push(Span::styled(right, Style::new().fg(DIM)));
     f.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::new().bg(BG2)),
