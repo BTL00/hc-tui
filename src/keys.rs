@@ -162,6 +162,7 @@ pub enum Action {
     TogglePredict,
     NextWaiting,
     ToggleMouse,
+    OpenSettings,
     SendPrefix,
     Cancel,
 }
@@ -201,6 +202,7 @@ pub fn prefix_action(key: Key) -> Option<Action> {
         Key::Char('e') => TogglePredict,
         Key::Char('a') => NextWaiting,
         Key::Char('m') => ToggleMouse,
+        Key::Char(',') => OpenSettings,
         Key::Ctrl('b') => SendPrefix,
         Key::Esc | Key::Ctrl('[') | Key::Ctrl('c') => Cancel,
         _ => return None,
@@ -226,6 +228,10 @@ pub const HELP: &[(&str, &str)] = &[
     ("prefix a", "jump to the next agent waiting for you"),
     ("prefix b", "toggle sidebar"),
     ("prefix e", "toggle predictive echo"),
+    (
+        "prefix ,",
+        "settings: theme, pane gap, mouse, echo, sidebar width",
+    ),
     ("prefix m", "toggle the mouse (off: select text natively)"),
     (
         "mouse",

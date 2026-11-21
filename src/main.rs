@@ -6,7 +6,9 @@ mod hc;
 mod keys;
 mod layout;
 mod predict;
+mod settings;
 mod term_io;
+mod theme;
 mod ui;
 
 use anyhow::Result;
@@ -39,12 +41,11 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let mut predict = std::env::var("HC_TUI_PREDICT")
-        .map(|v| v != "0")
-        .unwrap_or(true);
-    let mut mouse = std::env::var("HC_TUI_MOUSE")
-        .map(|v| v != "0")
-        .unwrap_or(true);
+    // Saved settings, then the environment, then flags (flags win for this run only).
+    let (saved, settings_note) = settings::Settings::load();
+    let env_on = |k: &str| std::env::var(k).ok().map(|v| v != "0");
+    let mut predict = env_on("HC_TUI_PREDICT").unwrap_or(saved.predict);
+    let mut mouse = env_on("HC_TUI_MOUSE").unwrap_or(saved.mouse);
     let mut first: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -53,6 +54,8 @@ fn run() -> Result<()> {
             "--no-mouse" => mouse = false,
             "--attach" => first = args.next(),
             "--list" => return list(),
+            // Undocumented: draw one frame as text (for checking layouts).
+            "--snapshot" => return snapshot(args.next().as_deref()),
             "-V" | "--version" => {
                 println!("hc-tui {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
@@ -86,6 +89,10 @@ fn run() -> Result<()> {
     term_io::spawn_reader(tx, Event::Input);
 
     let mut app = app::App::new(conn, predict);
+    app.settings = saved;
+    if let Some(note) = settings_note {
+        app.say(note);
+    }
     app.set_mouse(mouse);
     let size = terminal.size()?;
     let (_, tab, _) = ui::areas(
@@ -131,6 +138,45 @@ fn run() -> Result<()> {
     drop(raw);
     ratatui::restore();
     result
+}
+
+/// `--snapshot [COLSxROWS] [settings]`: one frame drawn off-screen, printed as text.
+fn snapshot(size: Option<&str>) -> Result<()> {
+    let (w, h) = size
+        .and_then(|s| s.split_once('x'))
+        .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+        .unwrap_or((120u16, 30u16));
+    let (tx, rx) = mpsc::channel();
+    let conn = hc::Conn::open(&hc::hc_binary(), tx)?;
+    let mut app = app::App::new(conn, false);
+    app.settings = settings::Settings::load().0;
+    if std::env::args().any(|a| a == "settings") {
+        app.open_settings();
+    }
+    let backend = ratatui::backend::TestBackend::new(w, h);
+    let mut terminal = ratatui::Terminal::new(backend)?;
+    let (_, tab, _) = ui::areas(&app, ratatui::layout::Rect::new(0, 0, w, h));
+    app.set_area(tab);
+    app.refresh();
+    // Let the attached panes paint.
+    let until = std::time::Instant::now() + Duration::from_millis(1500);
+    while std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(50));
+        while let Ok(msg) = rx.try_recv() {
+            app.incoming(msg);
+        }
+    }
+    terminal.draw(|f| ui::draw(f, &app))?;
+    let buf = terminal.backend().buffer();
+    for y in 0..h {
+        let mut line = String::new();
+        for x in 0..w {
+            line.push_str(buf[(x, y)].symbol());
+        }
+        println!("{}", line.trim_end());
+    }
+    app.shutdown();
+    Ok(())
 }
 
 /// `--list`: the sidebar as text, no UI.

@@ -6,6 +6,7 @@ use crate::hc::{self, Conn, Incoming};
 use crate::keys::{self, Action, Dir, Key};
 use crate::layout;
 use crate::predict::Predictor;
+use crate::settings::{self, Settings};
 use anyhow::Result;
 use ratatui::layout::Rect;
 use serde_json::{Value, json};
@@ -168,6 +169,9 @@ pub enum Mode {
     Help,
     Prompt(Prompt, String),
     Confirm(Confirm),
+    Settings {
+        cursor: usize,
+    },
 }
 
 pub struct App {
@@ -198,6 +202,9 @@ pub struct App {
     pub drag: Option<(layout::Divider, u16)>,
     /// Sidebar rows on screen and the list's scroll offset, as last drawn.
     pub sidebar_view: std::cell::Cell<(Rect, usize)>,
+    /// Where the settings popup was drawn, for clicks.
+    pub settings_view: std::cell::Cell<Rect>,
+    pub settings: Settings,
     /// The start of a mouse report whose rest has not arrived yet.
     pending: Vec<u8>,
     refresh_due: Option<Instant>,
@@ -243,6 +250,8 @@ impl App {
             mouse: true,
             drag: None,
             sidebar_view: std::cell::Cell::new((Rect::default(), 0)),
+            settings_view: std::cell::Cell::new(Rect::default()),
+            settings: Settings::default(),
             pending: Vec::new(),
             refresh_due: None,
             doc_errors: Vec::new(),
@@ -703,6 +712,110 @@ impl App {
         }
     }
 
+    // ----- settings -------------------------------------------------------
+
+    pub fn open_settings(&mut self) {
+        self.mode = Mode::Settings { cursor: 0 };
+    }
+
+    /// (name, shown value) for each row of the settings popup.
+    pub fn settings_rows(&self) -> Vec<(&'static str, String)> {
+        let s = &self.settings;
+        let onoff = |b: bool| if b { "on" } else { "off" }.to_string();
+        vec![
+            ("theme", crate::theme::by_name(&s.theme).name.to_string()),
+            ("pane gap", s.pane_gap.to_string()),
+            ("mouse", onoff(self.mouse)),
+            ("predictive echo", onoff(self.predict.enabled)),
+            ("sidebar width", s.sidebar_width.to_string()),
+        ]
+    }
+
+    /// Moves the value of settings row `row` one step (`delta` -1 or +1).
+    fn change_setting(&mut self, row: usize, delta: isize) {
+        match row {
+            0 => self.settings.theme = crate::theme::step(&self.settings.theme, delta).name.into(),
+            1 => {
+                let gaps = settings::GAPS;
+                let i = gaps
+                    .iter()
+                    .position(|&g| g == self.settings.pane_gap)
+                    .unwrap_or(1) as isize;
+                self.settings.pane_gap =
+                    gaps[(i + delta).clamp(0, gaps.len() as isize - 1) as usize];
+            }
+            2 => {
+                let on = !self.mouse;
+                self.set_mouse(on);
+                self.settings.mouse = on;
+            }
+            3 => {
+                self.predict.enabled = !self.predict.enabled;
+                self.predict.clear();
+                self.settings.predict = self.predict.enabled;
+            }
+            4 => {
+                let w = self.settings.sidebar_width as isize + delta * 2;
+                self.settings.sidebar_width = w.clamp(
+                    settings::SIDEBAR_MIN as isize,
+                    settings::SIDEBAR_MAX as isize,
+                ) as u16;
+            }
+            _ => return,
+        }
+        self.save_settings();
+    }
+
+    fn save_settings(&mut self) {
+        if let Err(e) = self.settings.save() {
+            self.say(format!("settings not saved: {e}"));
+        }
+    }
+
+    fn settings_key(&mut self, cursor: usize, key: Key) {
+        let n = self.settings_rows().len();
+        let cursor = match key {
+            Key::Char('j') | Key::Down | Key::Tab => (cursor + 1) % n,
+            Key::Char('k') | Key::Up | Key::BackTab => (cursor + n - 1) % n,
+            Key::Char('l') | Key::Right | Key::Enter | Key::Char(' ') => {
+                self.change_setting(cursor, 1);
+                cursor
+            }
+            Key::Char('h') | Key::Left => {
+                self.change_setting(cursor, -1);
+                cursor
+            }
+            Key::Esc | Key::Ctrl('[') | Key::Char('q') => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            _ => cursor,
+        };
+        self.mode = Mode::Settings { cursor };
+    }
+
+    /// A click in the popup picks a row; on its value, the left half steps back.
+    fn settings_click(&mut self, m: keys::Mouse) {
+        let r = self.settings_view.get();
+        if !contains(r, m.x, m.y) {
+            self.mode = Mode::Normal;
+            return;
+        }
+        // Border, then one line per row.
+        let row = (m.y - r.y) as usize;
+        if row == 0 || row > self.settings_rows().len() {
+            return;
+        }
+        let row = row - 1;
+        // Inside the border: " ▸ " (3) + name (17), then "‹ " and the value.
+        let arrow = r.x + 1 + 20;
+        if m.x >= arrow {
+            let back = m.x <= arrow + 1;
+            self.change_setting(row, if back { -1 } else { 1 });
+        }
+        self.mode = Mode::Settings { cursor: row };
+    }
+
     // ----- mouse ----------------------------------------------------------
 
     pub fn set_mouse(&mut self, on: bool) {
@@ -715,6 +828,12 @@ impl App {
             Mode::Help => {
                 if m.left_press() {
                     self.mode = Mode::Normal;
+                }
+                return;
+            }
+            Mode::Settings { .. } => {
+                if m.left_press() {
+                    self.settings_click(m);
                 }
                 return;
             }
@@ -884,6 +1003,7 @@ impl App {
             Mode::Picker { .. } => self.picker_key(key),
             Mode::Help => self.mode = Mode::Normal,
             Mode::Prompt(kind, text) => self.prompt_key(kind, text, key),
+            Mode::Settings { cursor } => self.settings_key(cursor, key),
             Mode::Confirm(what) => {
                 self.mode = Mode::Normal;
                 if matches!(key, Key::Char('y' | 'Y') | Key::Enter) {
@@ -986,8 +1106,11 @@ impl App {
             }
             ToggleSidebar => self.sidebar = !self.sidebar,
             Help => self.mode = Mode::Help,
+            OpenSettings => self.open_settings(),
             TogglePredict => {
                 self.predict.enabled = !self.predict.enabled;
+                self.settings.predict = self.predict.enabled;
+                self.save_settings();
                 self.predict.clear();
                 self.say(if self.predict.enabled {
                     "predictive echo on"
@@ -1012,6 +1135,8 @@ impl App {
             ToggleMouse => {
                 let on = !self.mouse;
                 self.set_mouse(on);
+                self.settings.mouse = on;
+                self.save_settings();
                 self.say(if on {
                     "mouse on"
                 } else {

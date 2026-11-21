@@ -47,6 +47,11 @@ with predictive local echo for laggy links.
   resize, wheel to scroll a pane's history (typing jumps back down). Programs that use the mouse themselves
   (editors, htop) get the clicks and the wheel. `ctrl+b m` or `--no-mouse` turns it off so you can select
   text the usual way; in Windows Terminal, shift+drag selects even with the mouse on.
+- **Themes and settings.** `ctrl+b ,` opens settings: theme (Gruvbox Dark, Monokai, Dracula, Tokyo Night,
+  Catppuccin Mocha, One Dark, Nord, Solarized Dark, or Terminal for your terminal's own colours), the gap
+  between sidebar and panes, mouse, predictive echo and sidebar width. Changes show at once and are saved
+  to `%APPDATA%hc-tuisettings.json` (`~/.config/hc-tui/settings.json` elsewhere). Themes also recolour
+  the default and 16 basic colours inside panes, like a terminal theme does.
 - **Unplaced terminals.** Terminals started with `hc run` that no layout shows are listed at the bottom
   of the sidebar; Enter puts one into a new tab.
 
@@ -91,6 +96,7 @@ hc-tui --no-mouse           # mouse off (select text natively)
 | `prefix g` | goto picker: `/` search, `b w i d a` filters, Enter |
 | `prefix a` | jump to the next agent waiting for you |
 | `prefix b` | toggle the sidebar |
+| `prefix ,` | settings (theme, gap, mouse, echo, sidebar width) |
 | `prefix m` | toggle the mouse |
 | `prefix e` | toggle predictive echo |
 | `prefix q` | detach; everything keeps running |

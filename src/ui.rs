@@ -1,35 +1,39 @@
 //! Drawing: sidebar (machines → workspaces → tabs), the current tab's panes
 //! (predictions on top of the focused one), status line, overlays.
-//! Colors lean on gruvbox, like herdr's default theme.
+//! Colours come from the theme picked in settings (`theme.rs`).
 
 use crate::app::{App, Confirm, Mode, Pane, Prompt, Row};
 use crate::keys::HELP;
+use crate::theme::{THEMES, Theme};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
-const SIDEBAR_WIDTH: u16 = 32;
-const BG: Color = Color::Rgb(0x28, 0x28, 0x28);
-const BG2: Color = Color::Rgb(0x3c, 0x38, 0x36);
-const FG: Color = Color::Rgb(0xeb, 0xdb, 0xb2);
-const DIM: Color = Color::Rgb(0x92, 0x83, 0x74);
-const YELLOW: Color = Color::Rgb(0xfa, 0xbd, 0x2f);
-const RED: Color = Color::Rgb(0xfb, 0x49, 0x34);
-const GREEN: Color = Color::Rgb(0xb8, 0xbb, 0x26);
-const BLUE: Color = Color::Rgb(0x83, 0xa5, 0x98);
-const AQUA: Color = Color::Rgb(0x8e, 0xc0, 0x7c);
-const ORANGE: Color = Color::Rgb(0xfe, 0x80, 0x19);
-/// Row background for an agent waiting for you (dark gruvbox yellow).
-const WAIT_BG: Color = Color::Rgb(0x4a, 0x3b, 0x12);
+thread_local! {
+    static THEME: std::cell::Cell<&'static Theme> = std::cell::Cell::new(&THEMES[0]);
+}
+
+/// The theme of the frame being drawn.
+fn th() -> &'static Theme {
+    THEME.with(|c| c.get())
+}
 
 /// (sidebar, tab area, status line).
 pub fn areas(app: &App, area: Rect) -> (Option<Rect>, Rect, Rect) {
     let [body, status] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-    if app.sidebar && body.width > SIDEBAR_WIDTH + 20 {
+    let width = app.settings.sidebar_width;
+    if app.sidebar && body.width > width + 20 {
         let [side, pane] =
-            Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)]).areas(body);
+            Layout::horizontal([Constraint::Length(width), Constraint::Min(1)]).areas(body);
+        // A little air between the sidebar line and the first column.
+        let gap = app.settings.pane_gap.min(pane.width.saturating_sub(1));
+        let pane = Rect {
+            x: pane.x + gap,
+            width: pane.width - gap,
+            ..pane
+        };
         (Some(side), pane, status)
     } else {
         (None, body, status)
@@ -37,6 +41,8 @@ pub fn areas(app: &App, area: Rect) -> (Option<Rect>, Rect, Rect) {
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
+    THEME.with(|c| c.set(crate::theme::by_name(&app.settings.theme)));
+    f.render_widget(Block::default().style(Style::new().bg(th().bg)), f.area());
     let (side, tab, status) = areas(app, f.area());
     match side {
         Some(side) => draw_sidebar(f, app, side),
@@ -49,6 +55,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::Picker { .. } => draw_picker(f, app, f.area()),
         Mode::Prompt(kind, text) => draw_prompt(f, kind, text, f.area()),
         Mode::Confirm(what) => draw_confirm(f, app, what, f.area()),
+        Mode::Settings { cursor } => draw_settings(f, app, *cursor, f.area()),
         _ => {}
     }
 }
@@ -65,14 +72,14 @@ fn rank(status: &str) -> u8 {
 
 pub fn status_style(status: &str, live: bool) -> (&'static str, Color) {
     if !live {
-        return ("✗", DIM);
+        return ("✗", th().dim);
     }
     match status {
-        "working" => ("●", YELLOW),
-        "blocked" => ("▲", RED),
-        "idle" => ("○", GREEN),
-        "done" => ("✓", BLUE),
-        _ => ("·", DIM),
+        "working" => ("●", th().yellow),
+        "blocked" => ("▲", th().red),
+        "idle" => ("○", th().green),
+        "done" => ("✓", th().blue),
+        _ => ("·", th().dim),
     }
 }
 
@@ -95,9 +102,9 @@ fn truncate(s: &str, width: usize) -> String {
 /// Right-hand tag for a terminal that stopped and waits for you.
 fn wait_tag(status: &str) -> Span<'static> {
     let (text, color) = match status {
-        "blocked" => ("needs you", RED),
-        "error" => ("error", RED),
-        _ => ("your turn", YELLOW),
+        "blocked" => ("needs you", th().red),
+        "error" => ("error", th().red),
+        _ => ("your turn", th().yellow),
     };
     Span::styled(text, Style::new().fg(color).add_modifier(Modifier::BOLD))
 }
@@ -105,7 +112,7 @@ fn wait_tag(status: &str) -> Span<'static> {
 /// Right-hand tag naming the agent (`claude`, `codex`...), if hc detected one.
 fn app_tag(term: Option<&crate::app::Term>) -> Span<'static> {
     let name = term.map(|x| x.app.replace("-code", "")).unwrap_or_default();
-    Span::styled(name, Style::new().fg(DIM))
+    Span::styled(name, Style::new().fg(th().dim))
 }
 
 /// `prefix` + `name` (truncated) + padding + `tag` flush right, in `width` columns.
@@ -145,13 +152,13 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         .map(|(row_i, row)| match row {
             Row::Machine(name, state) => {
                 let color = match state.as_str() {
-                    "connected" | "local" => AQUA,
-                    "connecting" => YELLOW,
-                    _ => RED,
+                    "connected" | "local" => th().aqua,
+                    "connecting" => th().yellow,
+                    _ => th().red,
                 };
                 let up = matches!(state.as_str(), "connected" | "local");
                 let note = if state == "local" {
-                    Span::styled("this pc", Style::new().fg(DIM))
+                    Span::styled("this pc", Style::new().fg(th().dim))
                 } else {
                     Span::styled(state.clone(), Style::new().fg(color))
                 };
@@ -160,7 +167,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                     vec![Span::raw("💻 ")],
                     name,
                     Style::new()
-                        .fg(if up { FG } else { DIM })
+                        .fg(if up { th().fg } else { th().dim })
                         .add_modifier(Modifier::BOLD),
                     note,
                     inner_w,
@@ -172,7 +179,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                     .as_ref()
                     .is_some_and(|c| c.on == s.on && c.space == s.id);
                 let style = Style::new()
-                    .fg(if is_current { ORANGE } else { DIM })
+                    .fg(if is_current { th().orange } else { th().dim })
                     .add_modifier(Modifier::BOLD);
                 let mut waiting: Vec<&String> = s
                     .tabs
@@ -186,7 +193,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 } else {
                     Span::styled(
                         format!("{} waiting", waiting.len()),
-                        Style::new().fg(YELLOW).add_modifier(Modifier::BOLD),
+                        Style::new().fg(th().yellow).add_modifier(Modifier::BOLD),
                     )
                 };
                 ListItem::new(fitted(
@@ -214,7 +221,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                     .max_by_key(|x| (x.live, rank(&x.status)));
                 let (glyph, color) = worst
                     .map(|x| status_style(&x.status, x.live))
-                    .unwrap_or(("·", DIM));
+                    .unwrap_or(("·", th().dim));
                 let split = t.terminals.len() > 1;
                 let shown = if is_current { focused.clone() } else { None };
                 let name = if !t.name.is_empty() {
@@ -236,22 +243,23 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                     .filter(|a| app.waiting(a))
                     .filter_map(|a| app.term(a))
                     .max_by_key(|x| rank(&x.status));
-                let mut name_style = Style::new().fg(FG);
+                let mut name_style = Style::new().fg(th().fg);
                 if is_current {
                     name_style = name_style.add_modifier(Modifier::BOLD);
                 }
                 let tag = match (waiting, split) {
                     (Some(w), false) => wait_tag(&w.status),
-                    (Some(_), true) => {
-                        Span::styled("▾", Style::new().fg(YELLOW).add_modifier(Modifier::BOLD))
-                    }
+                    (Some(_), true) => Span::styled(
+                        "▾",
+                        Style::new().fg(th().yellow).add_modifier(Modifier::BOLD),
+                    ),
                     (None, _) => app_tag(worst),
                 };
                 let line = fitted(
                     vec![
                         Span::styled(
                             if is_current { " ▌" } else { "  " },
-                            Style::new().fg(YELLOW),
+                            Style::new().fg(th().yellow),
                         ),
                         Span::styled(format!("{glyph} "), Style::new().fg(color)),
                     ],
@@ -262,7 +270,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 );
                 let item = ListItem::new(line);
                 if waiting.is_some() {
-                    item.style(Style::new().bg(WAIT_BG))
+                    item.style(Style::new().bg(th().wait_bg))
                 } else {
                     item
                 }
@@ -281,14 +289,18 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 let term = app.term(address);
                 let (glyph, color) = term
                     .map(|x| status_style(&x.status, x.live))
-                    .unwrap_or(("·", DIM));
+                    .unwrap_or(("·", th().dim));
                 let name = term.map(|x| x.display()).unwrap_or_else(|| address.clone());
                 let last = *pi + 1 == t.terminals.len();
                 let waiting = app.waiting(address);
                 let name_style = if is_focused {
-                    Style::new().fg(FG).add_modifier(Modifier::BOLD)
+                    Style::new().fg(th().fg).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::new().fg(if is_current || waiting { FG } else { DIM })
+                    Style::new().fg(if is_current || waiting {
+                        th().fg
+                    } else {
+                        th().dim
+                    })
                 };
                 let tag = match term {
                     Some(x) if waiting => wait_tag(&x.status),
@@ -298,7 +310,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                     vec![
                         Span::styled(
                             if last { "   └ " } else { "   ├ " },
-                            Style::new().fg(if is_focused { YELLOW } else { BG2 }),
+                            Style::new().fg(if is_focused { th().yellow } else { th().bg2 }),
                         ),
                         Span::styled(format!("{glyph} "), Style::new().fg(color)),
                     ],
@@ -309,14 +321,14 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 );
                 let item = ListItem::new(line);
                 if waiting {
-                    item.style(Style::new().bg(WAIT_BG))
+                    item.style(Style::new().bg(th().wait_bg))
                 } else {
                     item
                 }
             }
             Row::LooseHeader => ListItem::new(Line::from(Span::styled(
                 " unplaced · enter adds a tab",
-                Style::new().fg(DIM).add_modifier(Modifier::ITALIC),
+                Style::new().fg(th().dim).add_modifier(Modifier::ITALIC),
             ))),
             Row::Loose(i) => {
                 if navigating && row_i == app.nav_cursor {
@@ -331,7 +343,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                         Span::styled(format!("{glyph} "), Style::new().fg(color)),
                     ],
                     &t.display(),
-                    Style::new().fg(if waiting { FG } else { DIM }),
+                    Style::new().fg(if waiting { th().fg } else { th().dim }),
                     if waiting {
                         wait_tag(&t.status)
                     } else {
@@ -341,7 +353,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 );
                 let item = ListItem::new(line);
                 if waiting {
-                    item.style(Style::new().bg(WAIT_BG))
+                    item.style(Style::new().bg(th().wait_bg))
                 } else {
                     item
                 }
@@ -355,16 +367,16 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     };
     let block = Block::default()
         .borders(Borders::RIGHT)
-        .border_style(Style::new().fg(if navigating { YELLOW } else { BG2 }))
+        .border_style(Style::new().fg(if navigating { th().yellow } else { th().bg2 }))
         .title(Span::styled(
             title,
-            Style::new().fg(if navigating { YELLOW } else { DIM }),
+            Style::new().fg(if navigating { th().yellow } else { th().dim }),
         ))
-        .style(Style::new().bg(BG));
+        .style(Style::new().bg(th().bg));
     let inner = block.inner(area);
     let list = List::new(items)
         .block(block)
-        .highlight_style(Style::new().bg(BG2).add_modifier(Modifier::BOLD));
+        .highlight_style(Style::new().bg(th().bg2).add_modifier(Modifier::BOLD));
     let mut state = ListState::default().with_selected(selected);
     f.render_stateful_widget(list, area, &mut state);
     app.sidebar_view.set((inner, state.offset()));
@@ -386,16 +398,28 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         };
         f.render_widget(
             Paragraph::new(notes.join("\n"))
-                .style(Style::new().fg(DIM).bg(BG))
+                .style(Style::new().fg(th().dim).bg(th().bg))
                 .wrap(ratatui::widgets::Wrap { trim: true }),
             rect,
         );
     }
 }
 
-fn vt_color(c: vt100::Color) -> Color {
+/// A pane cell colour under the theme: defaults and the 16 basic colours follow it.
+fn vt_color(c: vt100::Color, background: bool) -> Color {
+    let t = th();
     match c {
-        vt100::Color::Default => Color::Reset,
+        vt100::Color::Default => match t.pane {
+            Some((fg, bg)) => {
+                if background {
+                    bg
+                } else {
+                    fg
+                }
+            }
+            None => Color::Reset,
+        },
+        vt100::Color::Idx(i) if i < 16 => t.ansi.map_or(Color::Indexed(i), |a| a[i as usize]),
         vt100::Color::Idx(i) => Color::Indexed(i),
         vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
     }
@@ -411,7 +435,7 @@ fn draw_tab(f: &mut Frame, app: &App, area: Rect) {
         let help = format!(
             "{msg}\n\n  ctrl+b w  pick a tab\n  ctrl+b c  new tab\n  ctrl+b g  goto any terminal\n  ctrl+b ?  help"
         );
-        f.render_widget(Paragraph::new(help).style(Style::new().fg(DIM)), area);
+        f.render_widget(Paragraph::new(help).style(Style::new().fg(th().dim)), area);
         return;
     }
     let focused = app.focused();
@@ -433,7 +457,7 @@ fn draw_tab(f: &mut Frame, app: &App, area: Rect) {
                     && fr.x < rect.x + rect.width
             }
         });
-        let style = Style::new().fg(if touches { YELLOW } else { BG2 });
+        let style = Style::new().fg(if touches { th().yellow } else { th().bg2 });
         let buf = f.buffer_mut();
         for y in rect.y..rect.y + rect.height {
             for x in rect.x..rect.x + rect.width {
@@ -464,7 +488,7 @@ fn draw_tab(f: &mut Frame, app: &App, area: Rect) {
             for x in line.x..line.x + line.width {
                 if let Some(c) = buf.cell_mut((x, y)) {
                     c.set_symbol(if d.vertical { "┃" } else { "━" })
-                        .set_style(Style::new().fg(YELLOW));
+                        .set_style(Style::new().fg(th().yellow));
                 }
             }
         }
@@ -474,7 +498,7 @@ fn draw_tab(f: &mut Frame, app: &App, area: Rect) {
         match app.panes.get(address) {
             Some(pane) => draw_pane(f, app, address, pane, *rect, is_focused),
             None => f.render_widget(
-                Paragraph::new(format!(" attaching {address}…")).style(Style::new().fg(DIM)),
+                Paragraph::new(format!(" attaching {address}…")).style(Style::new().fg(th().dim)),
                 *rect,
             ),
         }
@@ -510,8 +534,8 @@ fn draw_pane(f: &mut Frame, app: &App, address: &str, pane: &Pane, area: Rect, f
                 m |= Modifier::DIM;
             }
             let style = Style::new()
-                .fg(vt_color(cell.fgcolor()))
-                .bg(vt_color(cell.bgcolor()))
+                .fg(vt_color(cell.fgcolor(), false))
+                .bg(vt_color(cell.bgcolor(), true))
                 .add_modifier(m);
             let contents = cell.contents();
             if let Some(out) = buf.cell_mut((area.x + c, area.y + r)) {
@@ -534,7 +558,7 @@ fn draw_pane(f: &mut Frame, app: &App, address: &str, pane: &Pane, area: Rect, f
             height: 1,
         };
         f.render_widget(
-            Paragraph::new(note).style(Style::new().fg(BG).bg(DIM)),
+            Paragraph::new(note).style(Style::new().fg(th().ink).bg(th().dim)),
             rect,
         );
         return;
@@ -550,7 +574,7 @@ fn draw_pane(f: &mut Frame, app: &App, address: &str, pane: &Pane, area: Rect, f
             height: 1,
         };
         f.render_widget(
-            Paragraph::new(note).style(Style::new().fg(BG).bg(YELLOW)),
+            Paragraph::new(note).style(Style::new().fg(th().ink).bg(th().yellow)),
             rect,
         );
         return;
@@ -584,21 +608,33 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let mode = match &app.mode {
         Mode::Prefix => Span::styled(
             " PREFIX ",
-            Style::new().fg(BG).bg(YELLOW).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(th().ink)
+                .bg(th().yellow)
+                .add_modifier(Modifier::BOLD),
         ),
         Mode::Navigate => Span::styled(
             " NAV ",
-            Style::new().fg(BG).bg(AQUA).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(th().ink)
+                .bg(th().aqua)
+                .add_modifier(Modifier::BOLD),
         ),
         Mode::Resize => Span::styled(
             " RESIZE h/j/k/l esc ",
-            Style::new().fg(BG).bg(ORANGE).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(th().ink)
+                .bg(th().orange)
+                .add_modifier(Modifier::BOLD),
         ),
         Mode::Picker { .. } => Span::styled(
             " GOTO ",
-            Style::new().fg(BG).bg(BLUE).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(th().ink)
+                .bg(th().blue)
+                .add_modifier(Modifier::BOLD),
         ),
-        _ => Span::styled(" hc ", Style::new().fg(BG).bg(DIM)),
+        _ => Span::styled(" hc ", Style::new().fg(th().ink).bg(th().dim)),
     };
     let mut spans = vec![mode, Span::raw(" ")];
     if let Some((s, t)) = app.current_tab() {
@@ -613,21 +649,27 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
                     t.name.clone()
                 }
             ),
-            Style::new().fg(ORANGE),
+            Style::new().fg(th().orange),
         ));
     }
     if let Some(term) = app.focused().and_then(|a| app.term(&a)) {
         spans.push(Span::styled(
             format!("{} ", term.address),
-            Style::new().fg(DIM),
+            Style::new().fg(th().dim),
         ));
-        spans.push(Span::styled(truncate(&term.cwd, 36), Style::new().fg(FG)));
+        spans.push(Span::styled(
+            truncate(&term.cwd, 36),
+            Style::new().fg(th().fg),
+        ));
     }
     if app.zoomed.is_some() {
-        spans.push(Span::styled(" [zoom]", Style::new().fg(AQUA)));
+        spans.push(Span::styled(" [zoom]", Style::new().fg(th().aqua)));
     }
     if let Some((msg, _)) = &app.message {
-        spans.push(Span::styled(format!("  {msg}"), Style::new().fg(YELLOW)));
+        spans.push(Span::styled(
+            format!("  {msg}"),
+            Style::new().fg(th().yellow),
+        ));
     }
     let waiting = app.waiting_list().len();
     let badge = if waiting > 0 {
@@ -645,11 +687,14 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     spans.push(Span::raw(" ".repeat(pad)));
     spans.push(Span::styled(
         badge,
-        Style::new().fg(BG).bg(YELLOW).add_modifier(Modifier::BOLD),
+        Style::new()
+            .fg(th().ink)
+            .bg(th().yellow)
+            .add_modifier(Modifier::BOLD),
     ));
-    spans.push(Span::styled(right, Style::new().fg(DIM)));
+    spans.push(Span::styled(right, Style::new().fg(th().dim)));
     f.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::new().bg(BG2)),
+        Paragraph::new(Line::from(spans)).style(Style::new().bg(th().bg2)),
         area,
     );
 }
@@ -668,12 +713,12 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 fn popup(title: &str) -> Block<'_> {
     Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(YELLOW))
+        .border_style(Style::new().fg(th().yellow))
         .title(Span::styled(
             format!(" {title} "),
-            Style::new().fg(YELLOW).add_modifier(Modifier::BOLD),
+            Style::new().fg(th().yellow).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::new().bg(BG).fg(FG))
+        .style(Style::new().bg(th().bg).fg(th().fg))
 }
 
 fn draw_help(f: &mut Frame, area: Rect) {
@@ -682,7 +727,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
         .iter()
         .map(|(k, d)| {
             Line::from(vec![
-                Span::styled(format!(" {k:<18}"), Style::new().fg(AQUA)),
+                Span::styled(format!(" {k:<18}"), Style::new().fg(th().aqua)),
                 Span::raw(*d),
             ])
         })
@@ -727,7 +772,7 @@ fn draw_picker(f: &mut Frame, app: &App, area: Rect) {
         if last.as_ref() != Some(&section) {
             items.push(ListItem::new(Line::from(Span::styled(
                 format!(" {section}"),
-                Style::new().fg(ORANGE).add_modifier(Modifier::BOLD),
+                Style::new().fg(th().orange).add_modifier(Modifier::BOLD),
             ))));
             last = Some(section);
         }
@@ -741,10 +786,10 @@ fn draw_picker(f: &mut Frame, app: &App, area: Rect) {
             .unwrap_or_default();
         items.push(ListItem::new(Line::from(vec![
             Span::styled(format!("   {glyph} "), Style::new().fg(color)),
-            Span::styled(t.display(), Style::new().fg(FG)),
+            Span::styled(t.display(), Style::new().fg(th().fg)),
             Span::styled(
                 format!("  {tab}  {} {}", t.app, t.status),
-                Style::new().fg(DIM),
+                Style::new().fg(th().dim),
             ),
         ])));
     }
@@ -768,12 +813,13 @@ fn draw_picker(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(block, rect);
     let [list_area, info] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
-    let list = List::new(items).highlight_style(Style::new().bg(BG2).add_modifier(Modifier::BOLD));
+    let list =
+        List::new(items).highlight_style(Style::new().bg(th().bg2).add_modifier(Modifier::BOLD));
     let mut state = ListState::default().with_selected(selected);
     f.render_stateful_widget(list, list_area, &mut state);
     if let Some(t) = app.terms.get(app.picker_cursor) {
         f.render_widget(
-            Paragraph::new(format!(" {} · {}", t.address, t.cwd)).style(Style::new().fg(DIM)),
+            Paragraph::new(format!(" {} · {}", t.address, t.cwd)).style(Style::new().fg(th().dim)),
             info,
         );
     }
@@ -817,4 +863,43 @@ fn draw_confirm(f: &mut Frame, app: &App, what: &Confirm, area: Rect) {
     let rect = centered(area, (text.chars().count() as u16 + 4).max(30), 3);
     f.render_widget(Clear, rect);
     f.render_widget(Paragraph::new(text).block(popup("confirm")), rect);
+}
+
+/// The settings popup: one row per setting, ‹ value › to change.
+fn draw_settings(f: &mut Frame, app: &App, cursor: usize, area: Rect) {
+    let rows = app.settings_rows();
+    let rect = centered(area, 46, rows.len() as u16 + 4);
+    app.settings_view.set(rect);
+    let lines: Vec<Line> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, (name, value))| {
+            let on = i == cursor;
+            let mark = if on { "▸ " } else { "  " };
+            let style = if on {
+                Style::new().fg(th().fg).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(th().fg)
+            };
+            Line::from(vec![
+                Span::styled(format!(" {mark}"), Style::new().fg(th().yellow)),
+                Span::styled(format!("{name:<17}"), style),
+                Span::styled("‹ ", Style::new().fg(th().dim)),
+                Span::styled(
+                    value.clone(),
+                    Style::new().fg(if on { th().yellow } else { th().aqua }),
+                ),
+                Span::styled(" ›", Style::new().fg(th().dim)),
+            ])
+        })
+        .chain([
+            Line::raw(""),
+            Line::from(Span::styled(
+                " j/k move · ←/→ or click change · esc close",
+                Style::new().fg(th().dim),
+            )),
+        ])
+        .collect();
+    f.render_widget(Clear, rect);
+    f.render_widget(Paragraph::new(lines).block(popup("settings")), rect);
 }
