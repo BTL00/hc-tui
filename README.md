@@ -16,7 +16,7 @@
 
 hc-tui is an unofficial terminal UI for [herdr-core](https://github.com/herdrdev/herdr-core) (`hc`), the
 runtime behind the Herdr desktop and iPhone apps, and shares their layout: split a pane here and it is
-split on your phone too. [Download 1.0.0](https://github.com/BTL00/hc-tui/releases/latest) for Windows,
+split on your phone too. [Download 1.0.1](https://github.com/BTL00/hc-tui/releases/latest) for Windows,
 Linux or macOS.
 
 > Not affiliated with the herdr project. Built because the herdr 0.9 terminal UI and the new
@@ -103,7 +103,7 @@ brew install btl00/tap/hc-tui
 **Or build it** with Rust:
 
 ```sh
-cargo install --git https://github.com/BTL00/hc-tui --tag v1.0.0
+cargo install --git https://github.com/BTL00/hc-tui --tag v1.0.1
 ```
 
 On Windows with the GNU toolchain, building needs `dlltool` on `PATH` (for example from
