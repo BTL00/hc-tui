@@ -8,6 +8,7 @@
   `set-clipboard on`. A setting, "copy from apps", turns it off. Requests replayed with a pane's
   history on attach are ignored, and programs can never read your clipboard.
 - **Alt+drag** selects with hc-tui even in panes whose program uses the mouse.
+- **`ctrl+b x` on a finished pane** (you typed `exit`) closes it at once, without the y/n question.
 
 ## 1.0.0
 

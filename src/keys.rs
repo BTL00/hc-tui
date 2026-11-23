@@ -221,7 +221,10 @@ pub const HELP: &[(&str, &str)] = &[
     ("prefix h/j/k/l", "move between panes"),
     ("prefix H/J/K/L", "swap panes"),
     ("prefix z", "zoom the focused pane"),
-    ("prefix x", "close pane (ends its program)"),
+    (
+        "prefix x",
+        "close pane (ends its program; no question if it already exited)",
+    ),
     ("prefix r", "resize mode: h/j/k/l, esc"),
     ("prefix n / p", "next / previous tab"),
     ("prefix 1..9", "jump to tab 1-9"),

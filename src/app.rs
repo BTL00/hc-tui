@@ -1452,7 +1452,14 @@ grep -F -e '"type":"assistant"' -e '"type":"user"' "$pick" | grep -vF -e '"tool_
             }
             ClosePane => {
                 if let Some(f) = self.focused() {
-                    self.mode = Mode::Confirm(Confirm::ClosePane(f));
+                    // Its program already ended (e.g. `exit`): nothing to lose, no question.
+                    let ended = self.panes.get(&f).is_some_and(|p| p.ended.is_some())
+                        || self.term(&f).is_some_and(|t| !t.live);
+                    if ended {
+                        self.confirmed(Confirm::ClosePane(f));
+                    } else {
+                        self.mode = Mode::Confirm(Confirm::ClosePane(f));
+                    }
                 }
             }
             ResizeMode => {

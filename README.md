@@ -130,7 +130,7 @@ hc-tui --no-mouse           # mouse off (select text natively)
 | `prefix h/j/k/l` | move between panes |
 | `prefix H/J/K/L` | swap with the neighbouring pane |
 | `prefix z` | zoom the focused pane |
-| `prefix x` | close pane (ends its program) |
+| `prefix x` | close pane (ends its program; no question if it already exited) |
 | `prefix r` | resize mode: `h/j/k/l`, any other key leaves |
 | `prefix n` / `p` / `1..9` | next / previous / nth tab |
 | `prefix T` / `X` | rename / close tab |
