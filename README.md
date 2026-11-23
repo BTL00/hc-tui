@@ -2,6 +2,8 @@
 
 **Run a dozen coding agents in one terminal and see at a glance which one is waiting for you.**
 
+![hc-tui: two agents waiting, jumping to each, copying Claude's code block, switching themes](docs/demo.gif)
+
 - **Who needs me?** Every agent in a tree (machine → workspace → tab → pane). The ones that finished their
   turn or wait for a permission light up (`your turn`, `needs you`); `ctrl+b a` jumps to the next one.
 - **Copy code without broken lines.** Claude Code wraps long lines with real line breaks, so code copied
