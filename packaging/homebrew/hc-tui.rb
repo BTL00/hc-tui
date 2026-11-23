@@ -1,4 +1,4 @@
-# Homebrew formula for a tap repo (BTL00/homebrew-tap): brew install btl00/tap/hc-tui
+# Homebrew formula, published in https://github.com/BTL00/homebrew-tap (Formula/hc-tui.rb): brew install btl00/tap/hc-tui
 class HcTui < Formula
   desc "Terminal UI for herdr-core: many coding agents in one terminal"
   homepage "https://github.com/BTL00/hc-tui"

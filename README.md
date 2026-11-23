@@ -70,7 +70,7 @@ Linux or macOS.
 - **Themes and settings.** `ctrl+b ,` opens settings: theme (Gruvbox Dark, Monokai, Dracula, Tokyo Night,
   Catppuccin Mocha, One Dark, Nord, Solarized Dark, or Terminal for your terminal's own colours), the gap
   between sidebar and panes, mouse, predictive echo and sidebar width. Changes show at once and are saved
-  to `%APPDATA%hc-tuisettings.json` (`~/.config/hc-tui/settings.json` elsewhere). Themes also recolour
+  to `%APPDATA%\hc-tui\settings.json` (`~/.config/hc-tui/settings.json` elsewhere). Themes also recolour
   the default and 16 basic colours inside panes, like a terminal theme does.
 - **Unplaced terminals.** Terminals started with `hc run` that no layout shows are listed at the bottom
   of the sidebar; Enter puts one into a new tab.
@@ -86,6 +86,12 @@ You need [herdr-core](https://github.com/herdrdev/herdr-core) (`hc`) installed a
 
 ```powershell
 scoop install https://raw.githubusercontent.com/BTL00/hc-tui/main/packaging/scoop/hc-tui.json
+```
+
+**macOS and Linux, with [Homebrew](https://brew.sh):**
+
+```sh
+brew install btl00/tap/hc-tui
 ```
 
 **Or build it** with Rust:
@@ -143,7 +149,7 @@ programs' display queries. Layout changes go through `doc.get` / `doc.set` on th
 
 ## Limitations
 
-- No copy mode / scrollback yet, no mouse.
+- No keyboard copy mode; select with the mouse, or use `ctrl+b y` for Claude's code blocks.
 - Stacks and floating blocks from custom Herdr layouts are shown (the active child) but not editable.
 - The vt100 emulator covers what shells and coding agents use; exotic sequences and graphics are ignored.
 
