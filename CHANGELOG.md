@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.1
+
+- **Copying inside Claude Code reaches your clipboard.** Claude Code takes the mouse, so a drag in its pane
+  is Claude's own selection, and it copied to the clipboard of the machine it runs on. hc-tui now passes a
+  program's clipboard request (OSC 52) on to the computer you are sitting at, like tmux's
+  `set-clipboard on`. A setting, "copy from apps", turns it off. Requests replayed with a pane's
+  history on attach are ignored, and programs can never read your clipboard.
+- **Alt+drag** selects with hc-tui even in panes whose program uses the mouse.
+
 ## 1.0.0
 
 The first release. hc-tui is a terminal UI for [herdr-core](https://github.com/herdrdev/herdr-core):

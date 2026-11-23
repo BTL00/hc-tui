@@ -234,12 +234,12 @@ pub const HELP: &[(&str, &str)] = &[
     ("prefix e", "toggle predictive echo"),
     (
         "prefix ,",
-        "settings: theme, pane gap, mouse, echo, sidebar width",
+        "settings: theme, gap, mouse, echo, sidebar width, copy from apps",
     ),
     ("prefix m", "toggle the mouse (off: select text natively)"),
     (
         "mouse",
-        "click tab/pane, wheel scrolls history, drag dividers",
+        "click tab/pane, wheel scrolls history, drag dividers, alt+drag selects",
     ),
     ("prefix q", "detach (everything keeps running)"),
     ("prefix ctrl+b", "send ctrl+b to the program"),
@@ -272,6 +272,9 @@ impl Mouse {
     }
     pub fn left_press(&self) -> bool {
         !self.release && self.code & (64 | 32 | 3) == 0
+    }
+    pub fn alt(&self) -> bool {
+        self.code & 8 != 0
     }
 }
 
@@ -380,6 +383,11 @@ mod tests {
         assert_eq!(used, 10);
         assert_eq!((m.x, m.y, m.release), (11, 4, false));
         assert!(m.left_press());
+        assert!(!m.alt());
+        let MouseParse::Done(a, _) = parse_mouse(b"\x1b[<8;3;3M") else {
+            panic!("alt press");
+        };
+        assert!(a.left_press() && a.alt());
         let MouseParse::Done(w, _) = parse_mouse(b"\x1b[<65;1;1M") else {
             panic!("wheel");
         };

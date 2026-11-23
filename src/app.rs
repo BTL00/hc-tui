@@ -16,6 +16,27 @@ use std::time::{Duration, Instant};
 /// Lines each pane keeps for the mouse wheel, and how many to fetch on attach.
 const SCROLLBACK: usize = 5000;
 const HISTORY: usize = 500;
+/// Clipboard requests in the first moments after attaching are history being
+/// replayed, not something the program just copied.
+const ATTACH_QUIET_MS: u64 = 1500;
+/// Larger clipboard requests from a program are ignored.
+const CLIP_MAX: usize = 1 << 20;
+
+/// Catches OSC 52 ("put this on the clipboard") from a pane's program, so it
+/// can be passed on to the clipboard of the machine you are looking at, as
+/// tmux does with `set-clipboard on`. Reading the clipboard is never allowed.
+#[derive(Default)]
+pub struct Clip {
+    pub pending: Option<Vec<u8>>,
+}
+
+impl vt100::Callbacks for Clip {
+    fn copy_to_clipboard(&mut self, _: &mut vt100::Screen, _ty: &[u8], data: &[u8]) {
+        if data != b"?" && data.len() <= CLIP_MAX * 4 / 3 + 4 {
+            self.pending = Some(crate::copy::b64decode(&String::from_utf8_lossy(data)));
+        }
+    }
+}
 
 pub fn nz(n: u16) -> std::num::NonZeroU16 {
     std::num::NonZeroU16::new(n.max(1)).unwrap_or(std::num::NonZeroU16::MIN)
@@ -162,7 +183,9 @@ impl Selection {
 
 pub struct Pane {
     pub channel: u32,
-    pub parser: vt100::Parser,
+    pub parser: vt100::Parser<Clip>,
+    /// Clipboard requests before this moment are the history replayed on attach.
+    pub live_from: Instant,
     pub size: (u16, u16),
     pub ended: Option<String>,
 }
@@ -636,7 +659,13 @@ impl App {
     fn attach(&mut self, address: &str, (cols, rows): (u16, u16)) {
         let mut pane = Pane {
             channel: 0,
-            parser: vt100::Parser::new(nz(rows), nz(cols), SCROLLBACK),
+            parser: vt100::Parser::new_with_callbacks(
+                nz(rows),
+                nz(cols),
+                SCROLLBACK,
+                Clip::default(),
+            ),
+            live_from: Instant::now() + Duration::from_millis(ATTACH_QUIET_MS),
             size: (cols, rows),
             ended: None,
         };
@@ -654,6 +683,7 @@ impl App {
                 self.conn
                     .send(channel, hc::CREDIT, &(data.len() as u32).to_le_bytes());
                 let focused = self.focused();
+                let mut copied = None;
                 if let Some((address, p)) = self
                     .panes
                     .iter_mut()
@@ -663,6 +693,14 @@ impl App {
                     if focused.as_deref() == Some(address.as_str()) {
                         self.predict.reconcile(p.parser.screen());
                     }
+                    if let Some(bytes) = p.parser.callbacks_mut().pending.take()
+                        && Instant::now() >= p.live_from
+                    {
+                        copied = Some((address.clone(), bytes));
+                    }
+                }
+                if let Some((address, bytes)) = copied {
+                    self.forward_clipboard(&address, &bytes);
                 }
             }
             Incoming::Closed { channel, reason } => {
@@ -1006,6 +1044,7 @@ grep -F -e '"type":"assistant"' -e '"type":"user"' "$pick" | grep -vF -e '"tool_
             ("mouse", onoff(self.mouse)),
             ("predictive echo", onoff(self.predict.enabled)),
             ("sidebar width", s.sidebar_width.to_string()),
+            ("copy from apps", onoff(s.forward_clipboard)),
         ]
     }
 
@@ -1039,9 +1078,32 @@ grep -F -e '"type":"assistant"' -e '"type":"user"' "$pick" | grep -vF -e '"tool_
                     settings::SIDEBAR_MAX as isize,
                 ) as u16;
             }
+            5 => self.settings.forward_clipboard = !self.settings.forward_clipboard,
             _ => return,
         }
         self.save_settings();
+    }
+
+    /// A program in a pane put text on the clipboard (OSC 52), e.g. Claude Code
+    /// after you drag-select in it. That program may run on another machine, so
+    /// pass the text on to the clipboard where you are.
+    fn forward_clipboard(&mut self, address: &str, bytes: &[u8]) {
+        if !self.settings.forward_clipboard || bytes.is_empty() || bytes.len() > CLIP_MAX {
+            return;
+        }
+        let text = String::from_utf8_lossy(bytes).into_owned();
+        let from = self
+            .term(address)
+            .map(|t| t.title.clone())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| address.to_string());
+        match crate::copy::to_clipboard(&text) {
+            Ok(()) => self.say(format!(
+                "copied {} characters from {from}",
+                text.chars().count()
+            )),
+            Err(e) => self.say(format!("copy failed: {e}")),
+        }
     }
 
     fn save_settings(&mut self) {
@@ -1207,8 +1269,10 @@ grep -F -e '"type":"assistant"' -e '"type":"user"' "$pick" | grep -vF -e '"tool_
             screen.mouse_protocol_mode(),
             screen.mouse_protocol_encoding(),
         );
-        // The program handles the mouse itself (editors, htop, ...).
-        if mode != vt100::MouseProtocolMode::None {
+        // The program handles the mouse itself (editors, htop, Claude Code...),
+        // except alt+drag, which always selects here.
+        let own_select = m.left_press() && m.alt();
+        if mode != vt100::MouseProtocolMode::None && !own_select {
             if let Some(bytes) = keys::encode_mouse(&m, col, row, mode, encoding) {
                 self.conn.send(p.channel, hc::DATA, &bytes);
             }
@@ -2262,6 +2326,20 @@ fn contains(r: Rect, x: u16, y: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn programs_clipboard_requests_are_caught() {
+        let mut p = vt100::Parser::new_with_callbacks(nz(5), nz(20), 0, Clip::default());
+        p.process(b"hi\x1b]52;c;aGVsbG8=\x07there");
+        assert_eq!(
+            p.callbacks_mut().pending.take().as_deref(),
+            Some(&b"hello"[..])
+        );
+        assert!(p.screen().contents().contains("hithere"));
+        // A program asking to read the clipboard gets nothing.
+        p.process(b"\x1b]52;c;?\x07");
+        assert!(p.callbacks_mut().pending.is_none());
+    }
 
     #[test]
     fn selection_joins_wrapped_rows() {

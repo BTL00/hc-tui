@@ -12,6 +12,9 @@ pub struct Settings {
     pub mouse: bool,
     pub predict: bool,
     pub sidebar_width: u16,
+    /// Programs in panes (Claude Code, nvim) may set the clipboard with OSC 52;
+    /// pass that on to the clipboard of the machine you are looking at.
+    pub forward_clipboard: bool,
     other: Map<String, Value>,
 }
 
@@ -27,6 +30,7 @@ impl Default for Settings {
             mouse: true,
             predict: true,
             sidebar_width: 32,
+            forward_clipboard: true,
             other: Map::new(),
         }
     }
@@ -53,6 +57,9 @@ impl Settings {
                 .and_then(|v| v.as_u64())
                 .map(|w| (w as u16).clamp(SIDEBAR_MIN, SIDEBAR_MAX))
                 .unwrap_or(d.sidebar_width),
+            forward_clipboard: take("forward_clipboard")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(d.forward_clipboard),
             other,
         }
     }
@@ -64,6 +71,7 @@ impl Settings {
         m.insert("mouse".into(), json!(self.mouse));
         m.insert("predict".into(), json!(self.predict));
         m.insert("sidebar_width".into(), json!(self.sidebar_width));
+        m.insert("forward_clipboard".into(), json!(self.forward_clipboard));
         Value::Object(m)
     }
 

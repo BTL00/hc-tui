@@ -164,7 +164,10 @@ fn snapshot(size: Option<&str>) -> Result<()> {
     app.set_area(tab);
     app.refresh();
     // Let the attached panes paint.
-    let until = std::time::Instant::now() + Duration::from_millis(1500);
+    let wait = std::env::args()
+        .find_map(|a| a.strip_prefix("wait=").and_then(|ms| ms.parse().ok()))
+        .unwrap_or(1500);
+    let until = std::time::Instant::now() + Duration::from_millis(wait);
     while std::time::Instant::now() < until {
         std::thread::sleep(Duration::from_millis(50));
         while let Ok(msg) = rx.try_recv() {
