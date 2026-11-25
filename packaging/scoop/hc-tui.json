@@ -1,19 +1,19 @@
 {
-    "version": "1.0.1",
+    "version": "1.0.2",
     "description": "Terminal UI for herdr-core: many coding agents in one terminal, see who is waiting for you",
     "homepage": "https://github.com/BTL00/hc-tui",
     "license": "Apache-2.0",
     "notes": "hc-tui needs herdr-core (hc) installed and its core running.",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/BTL00/hc-tui/releases/download/v1.0.1/hc-tui-v1.0.1-x86_64-pc-windows-msvc.zip",
-            "hash": "d718773190a227f93bfca67fe1c99c9ed6417ed1a9c68c1b6ccd3eca9bc03b69",
-            "extract_dir": "hc-tui-v1.0.1-x86_64-pc-windows-msvc"
+            "url": "https://github.com/BTL00/hc-tui/releases/download/v1.0.2/hc-tui-v1.0.2-x86_64-pc-windows-msvc.zip",
+            "hash": "a9652392799471c7cf8aa6290cca1c6dbacbe8c377ca139e88e67a42f062acec",
+            "extract_dir": "hc-tui-v1.0.2-x86_64-pc-windows-msvc"
         },
         "arm64": {
-            "url": "https://github.com/BTL00/hc-tui/releases/download/v1.0.1/hc-tui-v1.0.1-aarch64-pc-windows-msvc.zip",
-            "hash": "69e5a94c7cd53db8410f320e85bf458232c9f03a86eabef80222bc190473e1c5",
-            "extract_dir": "hc-tui-v1.0.1-aarch64-pc-windows-msvc"
+            "url": "https://github.com/BTL00/hc-tui/releases/download/v1.0.2/hc-tui-v1.0.2-aarch64-pc-windows-msvc.zip",
+            "hash": "9292d789142eef22cc88914f747eca6ebe1010445631e85bd4364ea28276ba31",
+            "extract_dir": "hc-tui-v1.0.2-aarch64-pc-windows-msvc"
         }
     },
     "bin": "hc-tui.exe",
