@@ -34,6 +34,40 @@ pub fn set_mouse(on: bool) {
     let _ = out.flush();
 }
 
+/// The outer terminal's own background. A terminal window is rarely a whole
+/// number of cells: the padding, the scrollbar and part of a row or column show
+/// the terminal's background, which no program can draw on. This gives them the
+/// theme's colour (OSC 11) and the terminal's own back when dropped (OSC 111).
+#[derive(Default)]
+pub struct Edges(Option<(u8, u8, u8)>);
+
+impl Edges {
+    /// None: the terminal's own background.
+    pub fn set(&mut self, want: Option<(u8, u8, u8)>) {
+        use std::io::Write;
+        if want == self.0 {
+            return;
+        }
+        self.0 = want;
+        let mut out = std::io::stdout();
+        let _ = out.write_all(edge_sequence(want).as_bytes());
+        let _ = out.flush();
+    }
+}
+
+impl Drop for Edges {
+    fn drop(&mut self) {
+        self.set(None);
+    }
+}
+
+fn edge_sequence(want: Option<(u8, u8, u8)>) -> String {
+    match want {
+        Some((r, g, b)) => format!("\x1b]11;rgb:{r:02x}/{g:02x}/{b:02x}\x1b\\"),
+        None => "\x1b]111\x1b\\".into(),
+    }
+}
+
 /// Reads keys on a thread and hands them to `tx` until input closes.
 pub fn spawn_reader<T: Send + 'static>(tx: mpsc::Sender<T>, wrap: fn(Vec<u8>) -> T) {
     std::thread::spawn(move || {
@@ -60,6 +94,9 @@ mod imp {
     use windows_sys::Win32::Storage::FileSystem::ReadFile;
     use windows_sys::Win32::System::Console::*;
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_J, VK_M, VK_SHIFT,
+    };
 
     pub type Saved = Option<(u32, u32, u32, u32)>;
 
@@ -155,7 +192,18 @@ mod imp {
             {
                 return None;
             }
-            Some(buf[..got as usize].to_vec())
+            let bytes = &buf[..got as usize];
+            // The console gives ctrl+enter as a bare line feed (like ctrl+j) and
+            // shift+enter as a bare enter. Ask the keyboard which it was, so
+            // programs that tell them apart (Claude Code) can.
+            let down = |vk: VIRTUAL_KEY| GetAsyncKeyState(i32::from(vk)) < 0;
+            if bytes == b"\n" && down(VK_CONTROL) && !down(VK_J) {
+                return Some(crate::keys::CTRL_ENTER.to_vec());
+            }
+            if bytes == b"\r" && down(VK_SHIFT) && !down(VK_CONTROL) && !down(VK_M) {
+                return Some(crate::keys::SHIFT_ENTER.to_vec());
+            }
+            Some(bytes.to_vec())
         }
     }
     static BUTTONS: AtomicU32 = AtomicU32::new(0);
@@ -248,5 +296,17 @@ mod imp {
             Ok(0) | Err(_) => None,
             Ok(n) => Some(buf[..n].to_vec()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edges_take_the_theme_colour_and_give_it_back() {
+        let set = edge_sequence(Some((0x27, 0x28, 0x02)));
+        assert_eq!(set, "\x1b]11;rgb:27/28/02\x1b\\");
+        assert_eq!(edge_sequence(None), "\x1b]111\x1b\\");
     }
 }

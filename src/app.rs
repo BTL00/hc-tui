@@ -28,9 +28,56 @@ const CLIP_MAX: usize = 1 << 20;
 #[derive(Default)]
 pub struct Clip {
     pub pending: Option<Vec<u8>>,
+    /// The kitty keyboard flags the program asked for (a stack; the last one
+    /// counts). Not empty and not 0: it wants keys like ctrl+enter as `CSI u`.
+    pub keyboard: Vec<u16>,
+}
+
+impl Clip {
+    pub fn wants_csi_u(&self) -> bool {
+        self.keyboard.last().is_some_and(|&f| f != 0)
+    }
 }
 
 impl vt100::Callbacks for Clip {
+    /// The kitty keyboard protocol: `CSI > f u` pushes flags, `CSI < n u` pops,
+    /// `CSI = f ; m u` changes the current ones.
+    fn unhandled_csi(
+        &mut self,
+        _: &mut vt100::Screen,
+        i1: Option<u8>,
+        _i2: Option<u8>,
+        params: &[&[u16]],
+        c: char,
+    ) {
+        if c != 'u' {
+            return;
+        }
+        let param = |i: usize| params.get(i).and_then(|p| p.first()).copied();
+        match i1 {
+            Some(b'>') => {
+                if self.keyboard.len() < 32 {
+                    self.keyboard.push(param(0).unwrap_or(0));
+                }
+            }
+            Some(b'<') => {
+                let n = usize::from(param(0).unwrap_or(1).max(1));
+                let keep = self.keyboard.len().saturating_sub(n);
+                self.keyboard.truncate(keep);
+            }
+            Some(b'=') => {
+                let flags = param(0).unwrap_or(0);
+                let old = self.keyboard.pop().unwrap_or(0);
+                self.keyboard.push(match param(1).unwrap_or(1) {
+                    2 => old | flags,
+                    3 => old & !flags,
+                    _ => flags,
+                });
+            }
+            _ => {}
+        }
+    }
+
     fn copy_to_clipboard(&mut self, _: &mut vt100::Screen, _ty: &[u8], data: &[u8]) {
         if data != b"?" && data.len() <= CLIP_MAX * 4 / 3 + 4 {
             self.pending = Some(crate::copy::b64decode(&String::from_utf8_lossy(data)));
@@ -188,6 +235,101 @@ pub struct Pane {
     pub live_from: Instant,
     pub size: (u16, u16),
     pub ended: Option<String>,
+    /// Output of a redraw still in progress (after `ESC[?2026h`), not shown yet.
+    held: Vec<u8>,
+    held_since: Option<Instant>,
+    /// The last bytes given to the parser, to find marks split across reads.
+    tail: Vec<u8>,
+}
+
+/// Synchronized output (DEC mode 2026): programs wrap a redraw in these.
+const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
+const SYNC_END: &[u8] = b"\x1b[?2026l";
+/// A redraw that hasn't ended by then is shown anyway, like terminals do.
+pub const SYNC_MAX: Duration = Duration::from_millis(150);
+const HELD_MAX: usize = 1 << 20;
+
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+impl Pane {
+    fn new(parser: vt100::Parser<Clip>, size: (u16, u16)) -> Pane {
+        Pane {
+            channel: 0,
+            parser,
+            live_from: Instant::now() + Duration::from_millis(ATTACH_QUIET_MS),
+            size,
+            ended: None,
+            held: Vec::new(),
+            held_since: None,
+            tail: Vec::new(),
+        }
+    }
+
+    /// Program output to the screen. With `sync`, a redraw the program marked
+    /// (synchronized output) is held until it ends and then applied at once, so
+    /// a half-drawn screen, and the cursor wandering through it, is never shown.
+    pub fn feed(&mut self, data: &[u8], sync: bool) {
+        if !sync {
+            self.release();
+            self.apply(data);
+            return;
+        }
+        let mut data = data.to_vec();
+        loop {
+            if self.held_since.is_some() {
+                let from = self.held.len().saturating_sub(SYNC_END.len() - 1);
+                self.held.extend_from_slice(&data);
+                let Some(at) = find(&self.held[from..], SYNC_END) else {
+                    if self.held.len() > HELD_MAX {
+                        self.release();
+                    }
+                    return;
+                };
+                let end = from + at + SYNC_END.len();
+                let mut held = std::mem::take(&mut self.held);
+                data = held.split_off(end);
+                self.held_since = None;
+                self.apply(&held);
+            } else {
+                let mut probe = self.tail.clone();
+                let carried = probe.len();
+                probe.extend_from_slice(&data);
+                let Some(at) = find(&probe, SYNC_BEGIN) else {
+                    self.apply(&data);
+                    return;
+                };
+                let end = at + SYNC_BEGIN.len() - carried;
+                let rest = data.split_off(end);
+                self.apply(&data);
+                self.held_since = Some(Instant::now());
+                data = rest;
+            }
+        }
+    }
+
+    /// Shows a held redraw now: it ended, took too long, or syncing was turned off.
+    pub fn release(&mut self) {
+        self.held_since = None;
+        let held = std::mem::take(&mut self.held);
+        self.apply(&held);
+    }
+
+    /// When a held redraw is due to be shown even if it hasn't ended.
+    pub fn held_until(&self) -> Option<Instant> {
+        self.held_since.map(|t| t + SYNC_MAX)
+    }
+
+    fn apply(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.parser.process(bytes);
+        self.tail.extend_from_slice(bytes);
+        let cut = self.tail.len().saturating_sub(SYNC_BEGIN.len() - 1);
+        self.tail.drain(..cut);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -271,6 +413,9 @@ pub struct App {
     pub copy_view: std::cell::Cell<Rect>,
     pub copy_chip: std::cell::Cell<Rect>,
     copy_pending: Option<bool>,
+    /// An image paste asked for: the pane, and the key to send instead when
+    /// the clipboard holds no image (None: asked with ctrl+b i).
+    image_pending: Option<(String, Option<Vec<u8>>)>,
     /// The start of a mouse report whose rest has not arrived yet.
     pending: Vec<u8>,
     refresh_due: Option<Instant>,
@@ -278,6 +423,23 @@ pub struct App {
     /// Terminals that stopped (turn done, blocked, error) since you last looked.
     attention: HashSet<String>,
     last_status: HashMap<String, String>,
+    /// Where the focused pane wants the cursor this frame (set while drawing):
+    /// position, whether the pane runs a coding agent.
+    pub cursor_want: std::cell::Cell<Option<((u16, u16), bool)>>,
+    /// The steady-cursor state, kept between frames.
+    pub cursor_track: std::cell::Cell<CursorTrack>,
+    /// When you last typed into a pane; the cursor follows at once then.
+    pub last_typed: Option<Instant>,
+}
+
+/// A cursor position is shown once it has held this long (cursor: steady).
+pub const CURSOR_STEADY: Duration = Duration::from_millis(60);
+
+#[derive(Clone, Copy, Debug)]
+pub struct CursorTrack {
+    pub want: Option<(u16, u16)>,
+    pub since: Instant,
+    pub shown: Option<(u16, u16)>,
 }
 
 /// States where the program has stopped and wants something from you.
@@ -322,11 +484,19 @@ impl App {
             copy_view: std::cell::Cell::new(Rect::default()),
             copy_chip: std::cell::Cell::new(Rect::default()),
             copy_pending: None,
+            image_pending: None,
             pending: Vec::new(),
             refresh_due: None,
             doc_errors: Vec::new(),
             attention: HashSet::new(),
             last_status: HashMap::new(),
+            cursor_want: std::cell::Cell::new(None),
+            cursor_track: std::cell::Cell::new(CursorTrack {
+                want: None,
+                since: Instant::now(),
+                shown: None,
+            }),
+            last_typed: None,
         }
     }
 
@@ -394,6 +564,16 @@ impl App {
     // ----- model ----------------------------------------------------------
 
     pub fn tick(&mut self) {
+        let now = Instant::now();
+        let focused = self.focused();
+        for (address, p) in self.panes.iter_mut() {
+            if p.held_until().is_some_and(|t| now >= t) {
+                p.release();
+                if focused.as_deref() == Some(address.as_str()) {
+                    self.predict.reconcile(p.parser.screen());
+                }
+            }
+        }
         if self.refresh_due.is_some_and(|t| Instant::now() >= t) {
             self.refresh_due = None;
             self.refresh();
@@ -405,6 +585,24 @@ impl App {
         {
             self.message = None;
         }
+    }
+
+    /// How long the main loop may wait for input before something is due:
+    /// a held redraw to show, or a cursor that has now stayed put.
+    pub fn next_wake(&self) -> Duration {
+        let now = Instant::now();
+        let mut due = now + Duration::from_millis(100);
+        for p in self.panes.values() {
+            if let Some(t) = p.held_until() {
+                due = due.min(t);
+            }
+        }
+        let t = self.cursor_track.get();
+        if t.shown != t.want {
+            due = due.min(t.since + CURSOR_STEADY);
+        }
+        due.saturating_duration_since(now)
+            .max(Duration::from_millis(1))
     }
 
     fn schedule_refresh(&mut self) {
@@ -657,18 +855,10 @@ impl App {
     }
 
     fn attach(&mut self, address: &str, (cols, rows): (u16, u16)) {
-        let mut pane = Pane {
-            channel: 0,
-            parser: vt100::Parser::new_with_callbacks(
-                nz(rows),
-                nz(cols),
-                SCROLLBACK,
-                Clip::default(),
-            ),
-            live_from: Instant::now() + Duration::from_millis(ATTACH_QUIET_MS),
-            size: (cols, rows),
-            ended: None,
-        };
+        let mut pane = Pane::new(
+            vt100::Parser::new_with_callbacks(nz(rows), nz(cols), SCROLLBACK, Clip::default()),
+            (cols, rows),
+        );
         let params = json!({"terminal": address, "cols": cols, "rows": rows, "history": HISTORY});
         match self.conn.call("terminal.attach", params) {
             Ok(r) => pane.channel = r["channel"].as_u64().unwrap_or(0) as u32,
@@ -689,7 +879,7 @@ impl App {
                     .iter_mut()
                     .find(|(_, p)| p.channel == channel && p.ended.is_none())
                 {
-                    p.parser.process(&data);
+                    p.feed(&data, self.settings.sync_redraws);
                     if focused.as_deref() == Some(address.as_str()) {
                         self.predict.reconcile(p.parser.screen());
                     }
@@ -735,7 +925,11 @@ impl App {
 
     pub fn input(&mut self, incoming: &[u8]) {
         let mut owned = std::mem::take(&mut self.pending);
-        owned.extend_from_slice(incoming);
+        // hc-tui's own menus know enter only as enter.
+        match keys::plain_enter(incoming) {
+            Some(plain) if self.mode != Mode::Normal => owned.extend_from_slice(plain),
+            _ => owned.extend_from_slice(incoming),
+        }
         let mut bytes = &owned[..];
         while !bytes.is_empty() {
             match keys::parse_mouse(bytes) {
@@ -787,6 +981,32 @@ impl App {
             return;
         }
         let Some(f) = self.focused() else { return };
+        // ctrl+enter / shift+enter: as `CSI u` for a program that asked for such
+        // keys (or a coding agent, which reads them), else what terminals
+        // always sent: a line feed / a plain enter.
+        if let Some(plain) = keys::plain_enter(bytes) {
+            let csi_u = self
+                .panes
+                .get(&f)
+                .is_some_and(|p| p.parser.callbacks().wants_csi_u())
+                || self.term(&f).is_some_and(|t| !t.app.is_empty());
+            if csi_u {
+                self.selection = None;
+                return self.send_raw(&f, bytes);
+            }
+            return self.forward(plain);
+        }
+        // alt+v / ctrl+v: Claude Code's image paste. Claude on another machine reads
+        // that machine's clipboard, so bring the image from this one.
+        if (bytes == b"\x1bv" || bytes == b"\x16")
+            && self.settings.paste_images
+            && self
+                .term(&f)
+                .is_some_and(|t| t.on.is_some() && !t.app.is_empty())
+        {
+            self.image_pending = Some((f, Some(bytes.to_vec())));
+            return;
+        }
         if let Some(p) = self.panes.get_mut(&f)
             && p.ended.is_none()
         {
@@ -794,6 +1014,7 @@ impl App {
             // Typing brings a scrolled-back pane to the bottom again.
             p.parser.screen_mut().set_scrollback(0);
             self.predict.typed(bytes, p.parser.screen());
+            self.last_typed = Some(Instant::now());
             self.conn.send(p.channel, hc::DATA, bytes);
         }
     }
@@ -810,15 +1031,90 @@ impl App {
     }
 
     pub fn has_pending(&self) -> bool {
-        self.copy_pending.is_some()
+        self.copy_pending.is_some() || self.image_pending.is_some()
     }
 
     /// Work asked for during input that should wait until it has been drawn.
     pub fn run_pending(&mut self) {
+        if let Some((address, key)) = self.image_pending.take() {
+            self.paste_image(&address, key);
+        }
         if let Some(newest) = self.copy_pending.take() {
             self.message = None;
             self.load_copy(newest);
         }
+    }
+
+    /// Sends bytes to a pane's program as they are (no echo prediction).
+    fn send_raw(&mut self, address: &str, bytes: &[u8]) {
+        if let Some(p) = self.panes.get(address)
+            && p.ended.is_none()
+        {
+            self.conn.send(p.channel, hc::DATA, bytes);
+        }
+    }
+
+    /// Pastes the clipboard image into the focused pane now (`--snapshot paste=`).
+    pub fn paste_focused_image(&mut self) {
+        if let Some(f) = self.focused() {
+            self.paste_image(&f, None);
+        }
+    }
+
+    /// Puts the image on this computer's clipboard into a file beside the pane's
+    /// terminal and pastes its path, which Claude Code attaches as an image. Without an image, `key` (the alt+v / ctrl+v that asked) goes on
+    /// to the program unchanged.
+    fn paste_image(&mut self, address: &str, key: Option<Vec<u8>>) {
+        self.message = None;
+        let image = match crate::paste::clipboard_image() {
+            Ok(Some(image)) => image,
+            found => {
+                match key {
+                    Some(k) => self.send_raw(address, &k),
+                    None => self.say(match found {
+                        Err(e) => format!("reading the clipboard failed: {e}"),
+                        _ => "no image on the clipboard".into(),
+                    }),
+                }
+                return;
+            }
+        };
+        let (bytes, ext) = image;
+        if bytes.len() > crate::paste::IMAGE_MAX {
+            return self.say(format!(
+                "image too big ({} MB, at most 8)",
+                bytes.len() >> 20
+            ));
+        }
+        let r = self.conn.call(
+            "terminal.put",
+            json!({
+                "terminal": address,
+                "name": format!("paste.{ext}"),
+                "data": crate::copy::b64encode(&bytes),
+            }),
+        );
+        let path = match r {
+            Ok(r) => r["path"].as_str().unwrap_or("").to_string(),
+            Err(e) => return self.say(format!("sending the image failed: {e:#}")),
+        };
+        if path.is_empty() {
+            return self.say("sending the image failed: the core gave no path");
+        }
+        let bracketed = self
+            .panes
+            .get(address)
+            .is_some_and(|p| p.parser.screen().bracketed_paste());
+        let text = if bracketed {
+            format!("\x1b[200~{path}\x1b[201~")
+        } else {
+            path.clone()
+        };
+        self.send_raw(address, text.as_bytes());
+        self.say(format!(
+            "pasted image ({} KB) via {path}",
+            bytes.len().div_ceil(1024)
+        ));
     }
 
     fn load_copy(&mut self, newest: bool) {
@@ -1045,6 +1341,10 @@ grep -F -e '"type":"assistant"' -e '"type":"user"' "$pick" | grep -vF -e '"tool_
             ("predictive echo", onoff(self.predict.enabled)),
             ("sidebar width", s.sidebar_width.to_string()),
             ("copy from apps", onoff(s.forward_clipboard)),
+            ("sync redraws", onoff(s.sync_redraws)),
+            ("cursor", s.cursor.clone()),
+            ("paste images", onoff(s.paste_images)),
+            ("paint edges", onoff(s.paint_edges)),
         ]
     }
 
@@ -1079,6 +1379,22 @@ grep -F -e '"type":"assistant"' -e '"type":"user"' "$pick" | grep -vF -e '"tool_
                 ) as u16;
             }
             5 => self.settings.forward_clipboard = !self.settings.forward_clipboard,
+            6 => {
+                self.settings.sync_redraws = !self.settings.sync_redraws;
+                if !self.settings.sync_redraws {
+                    self.panes.values_mut().for_each(Pane::release);
+                }
+            }
+            7 => {
+                let n = settings::CURSORS.len() as isize;
+                let i = settings::CURSORS
+                    .iter()
+                    .position(|&c| c == self.settings.cursor)
+                    .unwrap_or(0) as isize;
+                self.settings.cursor = settings::CURSORS[(i + delta).rem_euclid(n) as usize].into();
+            }
+            8 => self.settings.paste_images = !self.settings.paste_images,
+            9 => self.settings.paint_edges = !self.settings.paint_edges,
             _ => return,
         }
         self.save_settings();
@@ -1526,6 +1842,12 @@ grep -F -e '"type":"assistant"' -e '"type":"user"' "$pick" | grep -vF -e '"tool_
             OpenSettings => self.open_settings(),
             CopyPicker => self.open_copy(false),
             CopyLast => self.open_copy(true),
+            PasteImage => {
+                if let Some(f) = self.focused() {
+                    self.image_pending = Some((f, None));
+                    self.say("reading the clipboard…");
+                }
+            }
             TogglePredict => {
                 self.predict.enabled = !self.predict.enabled;
                 self.settings.predict = self.predict.enabled;
@@ -2335,6 +2657,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn keyboard_protocol_requests_are_tracked() {
+        let mut p = vt100::Parser::new_with_callbacks(nz(5), nz(20), 0, Clip::default());
+        assert!(!p.callbacks().wants_csi_u());
+        // What Claude Code sends on start, then on exit.
+        p.process(b"\x1b[>5u\x1b[=5;1u");
+        assert!(p.callbacks().wants_csi_u());
+        p.process(b"\x1b[=4;3u");
+        assert_eq!(p.callbacks().keyboard, [1]);
+        p.process(b"\x1b[<u");
+        assert!(!p.callbacks().wants_csi_u());
+        assert_eq!(keys::plain_enter(keys::CTRL_ENTER), Some(&b"\n"[..]));
+        assert_eq!(keys::plain_enter(b"\r"), None);
+    }
+
+    #[test]
     fn programs_clipboard_requests_are_caught() {
         let mut p = vt100::Parser::new_with_callbacks(nz(5), nz(20), 0, Clip::default());
         p.process(b"hi\x1b]52;c;aGVsbG8=\x07there");
@@ -2346,6 +2683,42 @@ mod tests {
         // A program asking to read the clipboard gets nothing.
         p.process(b"\x1b]52;c;?\x07");
         assert!(p.callbacks_mut().pending.is_none());
+    }
+
+    fn test_pane() -> Pane {
+        Pane::new(
+            vt100::Parser::new_with_callbacks(nz(5), nz(30), 0, Clip::default()),
+            (30, 5),
+        )
+    }
+
+    #[test]
+    fn marked_redraws_show_whole() {
+        let mut p = test_pane();
+        p.feed(b"old\x1b[?20", true);
+        // The begin mark split across reads is still found.
+        p.feed(b"26h\x1b[2J\x1b[Hhalf", true);
+        assert!(p.parser.screen().contents().contains("old"));
+        assert!(p.held_until().is_some());
+        p.feed(b" done\x1b[?2026", true);
+        assert!(!p.parser.screen().contents().contains("half"));
+        p.feed(b"l after", true);
+        assert!(p.held_until().is_none());
+        let shown = p.parser.screen().contents();
+        assert!(shown.contains("half done after") && !shown.contains("old"));
+    }
+
+    #[test]
+    fn held_redraw_is_shown_on_release_or_without_sync() {
+        let mut p = test_pane();
+        p.feed(b"\x1b[?2026hstuck", true);
+        assert!(!p.parser.screen().contents().contains("stuck"));
+        p.release();
+        assert!(p.parser.screen().contents().contains("stuck"));
+        let mut q = test_pane();
+        q.feed(b"\x1b[?2026hnow", false);
+        assert!(q.parser.screen().contents().contains("now"));
+        assert!(q.held_until().is_none());
     }
 
     #[test]

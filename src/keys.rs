@@ -165,6 +165,7 @@ pub enum Action {
     OpenSettings,
     CopyPicker,
     CopyLast,
+    PasteImage,
     SendPrefix,
     Cancel,
 }
@@ -207,6 +208,7 @@ pub fn prefix_action(key: Key) -> Option<Action> {
         Key::Char(',') => OpenSettings,
         Key::Char('y') => CopyPicker,
         Key::Char('Y') => CopyLast,
+        Key::Char('i') => PasteImage,
         Key::Ctrl('b') => SendPrefix,
         Key::Esc | Key::Ctrl('[') | Key::Ctrl('c') => Cancel,
         _ => return None,
@@ -234,10 +236,14 @@ pub const HELP: &[(&str, &str)] = &[
     ("prefix g", "goto picker  (/ search, b w i d a filter)"),
     ("prefix a", "jump to the next agent waiting for you"),
     ("prefix b", "toggle sidebar"),
+    (
+        "prefix i",
+        "paste your clipboard's image (remote agent: alt+v)",
+    ),
     ("prefix e", "toggle predictive echo"),
     (
         "prefix ,",
-        "settings: theme, gap, mouse, echo, sidebar width, copy from apps",
+        "settings: theme, mouse, copy, cursor, images, edges…",
     ),
     ("prefix m", "toggle the mouse (off: select text natively)"),
     (
@@ -254,6 +260,23 @@ pub const HELP: &[(&str, &str)] = &[
     ),
     ("not yet", "copy mode ([)"),
 ];
+
+/// Ctrl+enter and shift+enter as the kitty keyboard protocol writes them.
+/// Terminals that speak it send these; on Windows hc-tui's reader makes them.
+pub const CTRL_ENTER: &[u8] = b"\x1b[13;5u";
+pub const SHIFT_ENTER: &[u8] = b"\x1b[13;2u";
+
+/// For a ctrl+enter or shift+enter key: the bytes terminals sent before that
+/// protocol (a line feed, a plain enter).
+pub fn plain_enter(bytes: &[u8]) -> Option<&'static [u8]> {
+    if bytes == CTRL_ENTER {
+        Some(b"\n")
+    } else if bytes == SHIFT_ENTER {
+        Some(b"\r")
+    } else {
+        None
+    }
+}
 
 /// A mouse report from the outer terminal (SGR form), 0-based cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

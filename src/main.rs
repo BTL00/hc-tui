@@ -6,6 +6,7 @@ mod copy;
 mod hc;
 mod keys;
 mod layout;
+mod paste;
 mod predict;
 mod settings;
 mod term_io;
@@ -13,6 +14,7 @@ mod theme;
 mod ui;
 
 use anyhow::Result;
+use std::io::Write;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -87,6 +89,7 @@ fn run() -> Result<()> {
 
     let mut terminal = ratatui::init();
     let raw = term_io::RawMode::enter();
+    let mut edges = term_io::Edges::default();
     term_io::spawn_reader(tx, Event::Input);
 
     let mut app = app::App::new(conn, predict);
@@ -114,12 +117,25 @@ fn run() -> Result<()> {
                 ratatui::layout::Rect::new(0, 0, size.width, size.height),
             );
             app.set_area(tab);
+            edges.set(match theme::by_name(&app.settings.theme).bg {
+                ratatui::style::Color::Rgb(r, g, b) if app.settings.paint_edges => Some((r, g, b)),
+                _ => None,
+            });
+            // Wrapped in synchronized output, so your terminal shows whole frames.
+            let sync = app.settings.sync_redraws;
+            if sync {
+                write!(terminal.backend_mut(), "\x1b[?2026h")?;
+            }
             terminal.draw(|f| ui::draw(f, &app))?;
+            if sync {
+                write!(terminal.backend_mut(), "\x1b[?2026l")?;
+                terminal.backend_mut().flush()?;
+            }
             if app.has_pending() {
                 app.run_pending();
                 continue;
             }
-            match rx.recv_timeout(Duration::from_millis(100)) {
+            match rx.recv_timeout(app.next_wake()) {
                 Ok(ev) => handle(&mut app, ev),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -140,6 +156,8 @@ fn run() -> Result<()> {
         term_io::set_mouse(false);
     }
     app.shutdown();
+    // Before raw mode ends: the console must still understand escapes.
+    drop(edges);
     drop(raw);
     ratatui::restore();
     result
@@ -167,10 +185,18 @@ fn snapshot(size: Option<&str>) -> Result<()> {
     let wait = std::env::args()
         .find_map(|a| a.strip_prefix("wait=").and_then(|ms| ms.parse().ok()))
         .unwrap_or(1500);
+    // `trace=<file>`: also write the panes' raw output there.
+    let mut trace = std::env::args()
+        .find_map(|a| a.strip_prefix("trace=").map(str::to_string))
+        .map(std::fs::File::create)
+        .transpose()?;
     let until = std::time::Instant::now() + Duration::from_millis(wait);
     while std::time::Instant::now() < until {
         std::thread::sleep(Duration::from_millis(50));
         while let Ok(msg) = rx.try_recv() {
+            if let (Some(file), hc::Incoming::Stream { data, .. }) = (trace.as_mut(), &msg) {
+                file.write_all(data)?;
+            }
             app.incoming(msg);
         }
     }
@@ -183,6 +209,34 @@ fn snapshot(size: Option<&str>) -> Result<()> {
         println!("loaded in {} ms", started.elapsed().as_millis());
         if let Some((msg, _)) = &app.message {
             println!("message: {msg}");
+        }
+    }
+    // `keys=<terminal>:<hex>`: what you would type there, as raw bytes.
+    if let Some(arg) = std::env::args().find_map(|a| a.strip_prefix("keys=").map(str::to_string))
+        && let Some((t, hex)) = arg.split_once(':')
+    {
+        let bytes: Vec<u8> = (0..hex.len() / 2)
+            .filter_map(|i| u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok())
+            .collect();
+        app.goto(t);
+        app.relayout();
+        app.input(&bytes);
+        std::thread::sleep(Duration::from_millis(1500));
+        while let Ok(msg) = rx.try_recv() {
+            app.incoming(msg);
+        }
+    }
+    // `paste=<terminal>`: paste the clipboard image (or HC_TUI_PASTE_FILE) there.
+    if let Some(t) = std::env::args().find_map(|a| a.strip_prefix("paste=").map(str::to_string)) {
+        app.goto(&t);
+        app.relayout();
+        app.paste_focused_image();
+        if let Some((msg, _)) = &app.message {
+            println!("message: {msg}");
+        }
+        std::thread::sleep(Duration::from_millis(2500));
+        while let Ok(msg) = rx.try_recv() {
+            app.incoming(msg);
         }
     }
     terminal.draw(|f| ui::draw(f, &app))?;

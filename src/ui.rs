@@ -2,7 +2,7 @@
 //! (predictions on top of the focused one), status line, overlays.
 //! Colours come from the theme picked in settings (`theme.rs`).
 
-use crate::app::{App, Confirm, CopyItem, Mode, Pane, Prompt, Row};
+use crate::app::{App, CURSOR_STEADY, Confirm, CopyItem, Mode, Pane, Prompt, Row};
 use crate::keys::HELP;
 use crate::theme::{THEMES, Theme};
 use ratatui::Frame;
@@ -10,6 +10,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use std::time::{Duration, Instant};
 
 thread_local! {
     static THEME: std::cell::Cell<&'static Theme> = std::cell::Cell::new(&THEMES[0]);
@@ -43,6 +44,7 @@ pub fn areas(app: &App, area: Rect) -> (Option<Rect>, Rect, Rect) {
 pub fn draw(f: &mut Frame, app: &App) {
     THEME.with(|c| c.set(crate::theme::by_name(&app.settings.theme)));
     f.render_widget(Block::default().style(Style::new().bg(th().bg)), f.area());
+    app.cursor_want.set(None);
     let (side, tab, status) = areas(app, f.area());
     match side {
         Some(side) => draw_sidebar(f, app, side),
@@ -59,6 +61,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::Copy { items, cursor } => draw_copy(f, app, items, *cursor, f.area()),
         _ => {}
     }
+    place_cursor(f, app);
 }
 
 fn rank(status: &str) -> u8 {
@@ -604,8 +607,39 @@ fn draw_pane(f: &mut Frame, app: &App, address: &str, pane: &Pane, area: Rect, f
             .cursor()
             .unwrap_or_else(|| screen.cursor_position());
         if !screen.hide_cursor() && row < area.height && col < area.width {
-            f.set_cursor_position((area.x + col, area.y + row));
+            let agent = app.term(address).is_some_and(|t| !t.app.is_empty());
+            app.cursor_want
+                .set(Some(((area.x + col, area.y + row), agent)));
         }
+    }
+}
+
+/// Puts the terminal cursor where the focused pane wants it, per the cursor
+/// setting. `steady` waits until a position has held for a moment, so a
+/// program redrawing around its cursor doesn't make it jump and blink.
+fn place_cursor(f: &mut Frame, app: &App) {
+    let want = app.cursor_want.take();
+    let mode = app.settings.cursor.as_str();
+    let pos = match want {
+        Some((_, true)) if mode == "off in agents" => None,
+        w => w.map(|(p, _)| p),
+    };
+    let now = Instant::now();
+    let typing = app.predict.cursor().is_some()
+        || app
+            .last_typed
+            .is_some_and(|t| now.duration_since(t) < Duration::from_millis(300));
+    let mut t = app.cursor_track.get();
+    if pos != t.want {
+        t.want = pos;
+        t.since = now;
+    }
+    if mode == "instant" || typing || now.duration_since(t.since) >= CURSOR_STEADY {
+        t.shown = t.want;
+    }
+    app.cursor_track.set(t);
+    if let Some(p) = t.shown {
+        f.set_cursor_position(p);
     }
 }
 

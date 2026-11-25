@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.0.2
+
+- **No more blinking cursor in Claude Code panes.** While Claude works, it redraws its screen about ten
+  times a second, hiding the cursor and moving it around each time, and hc-tui showed those half-done
+  redraws. hc-tui now honours synchronized output (DEC mode 2026): a redraw the program marks is shown
+  only once it is complete (or after 150 ms), and hc-tui's own frames reach your terminal the same way.
+  Setting: "sync redraws".
+- **Steady cursor.** The cursor moves only once it has stayed put for 60 ms (at once while you type).
+  Setting "cursor": `steady`, `instant` (the old behaviour) or `off in agents` (hidden in agent panes,
+  which draw their own caret).
+- **No differently coloured strip around hc-tui.** The terminal's padding, scrollbar and leftover part of a
+  row or column kept the terminal's own background. They now get the theme's (OSC 11) while hc-tui runs.
+  Setting: "paint edges".
+- **Ctrl+Enter and Shift+Enter reach Claude Code.** The Windows console hands programs Ctrl+Enter as a plain
+  line feed and Shift+Enter as a plain Enter, so Claude only added a line or sent. hc-tui now notices which
+  key it was and sends it the way the pane's program asked for (kitty keyboard protocol), so Ctrl+Enter
+  sends your message while Claude works and Shift+Enter starts a new line. Other programs get what they
+  always got.
+- **An `hc` skill for agents** in `skills/hc`: agents in hc terminals have `HC_TERMINAL_ID`, not herdr's
+  `HERDR_ENV`, and should read `hc --skill`. It replaces the old herdr skill.
+- **Paste images into Claude on another machine.** Claude Code reads images from the clipboard of the
+  machine it runs on, not yours. In a Claude pane on another machine, alt+v (or ctrl+v) now takes the
+  image from your clipboard, puts it in a file beside that terminal (`terminal.put`) and pastes its path, which
+  Claude attaches as `[Image #1]`. Without an image on the clipboard the key goes through as before.
+  `ctrl+b i` does it in any pane. Setting: "paste images".
+
 ## 1.0.1
 
 - **Copying inside Claude Code reaches your clipboard.** Claude Code takes the mouse, so a drag in its pane

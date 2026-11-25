@@ -16,7 +16,7 @@
 
 hc-tui is an unofficial terminal UI for [herdr-core](https://github.com/herdrdev/herdr-core) (`hc`), the
 runtime behind the Herdr desktop and iPhone apps, and shares their layout: split a pane here and it is
-split on your phone too. [Download 1.0.1](https://github.com/BTL00/hc-tui/releases/latest) for Windows,
+split on your phone too. [Download 1.0.2](https://github.com/BTL00/hc-tui/releases/latest) for Windows,
 Linux or macOS.
 
 > Not affiliated with the herdr project. Built because the herdr 0.9 terminal UI and the new
@@ -72,12 +72,25 @@ Linux or macOS.
   editors), the drag goes to the program; when it copies (OSC 52), hc-tui passes that on to the clipboard
   of the computer you are sitting at, even if the program runs on another machine. Alt+drag selects with
   hc-tui instead.
+- **Paste images into Claude on another machine.** Claude Code takes images from the clipboard of the
+  machine it runs on. In a Claude pane on another machine, alt+v (or ctrl+v) sends the image on *your*
+  clipboard there (a file beside that terminal, removed with it) and pastes its path, so Claude attaches
+  it; `ctrl+b i` does it in
+  any pane. Without an image the key goes through as usual. Setting: "paste images".
 - **Themes and settings.** `ctrl+b ,` opens settings: theme (Gruvbox Dark, Monokai, Dracula, Tokyo Night,
   Catppuccin Mocha, One Dark, Nord, Solarized Dark, or Terminal for your terminal's own colours), the gap
   between sidebar and panes, mouse, predictive echo, sidebar width, and whether programs may copy to
-  your clipboard ("copy from apps"). Changes show at once and are saved
+  your clipboard ("copy from apps"), "sync redraws" and "cursor" (below). Changes show at once and are saved
   to `%APPDATA%\hc-tui\settings.json` (`~/.config/hc-tui/settings.json` elsewhere). Themes also recolour
   the default and 16 basic colours inside panes, like a terminal theme does.
+- **No flicker.** Coding agents redraw their screen many times a second while they work. Claude Code marks
+  each redraw (synchronized output); with "sync redraws" on, hc-tui shows only finished redraws, and
+  sends its own frames to your terminal the same way. "cursor" picks how the pane's cursor is shown:
+  `steady` (default) moves it only once it has stayed put for a moment, so it doesn't jump or blink;
+  `instant` follows the program exactly; `off in agents` hides it in agent panes, which draw their own.
+- **No odd strip at the edges.** With "paint edges" on, the part of your terminal window hc-tui cannot draw on
+  (padding, scrollbar) takes the theme's background while it runs. Needs a terminal that knows OSC 11 and
+  OSC 111; if yours keeps the colour after you quit, turn it off.
 - **Unplaced terminals.** Terminals started with `hc run` that no layout shows are listed at the bottom
   of the sidebar; Enter puts one into a new tab.
 
@@ -103,11 +116,21 @@ brew install btl00/tap/hc-tui
 **Or build it** with Rust:
 
 ```sh
-cargo install --git https://github.com/BTL00/hc-tui --tag v1.0.1
+cargo install --git https://github.com/BTL00/hc-tui --tag v1.0.2
 ```
 
 On Windows with the GNU toolchain, building needs `dlltool` on `PATH` (for example from
 [llvm-mingw](https://github.com/mstorsjo/llvm-mingw)); the MSVC toolchain works as is.
+
+### Agents: load the hc skill
+
+Agents in hc terminals are not inside the old herdr: `HERDR_ENV` is not set and there is no `herdr` command, so
+the old herdr skill does nothing. Their address is `HC_TERMINAL_ID`, and the manual is `hc --skill`. Install the
+skill from this repository in place of the herdr one, so Claude Code knows to load that manual:
+
+```sh
+cp -r skills/hc ~/.claude/skills/hc      # then remove ~/.claude/skills/herdr
+```
 
 ## Use
 
@@ -140,7 +163,8 @@ hc-tui --no-mouse           # mouse off (select text natively)
 | `prefix a` | jump to the next agent waiting for you |
 | `prefix b` | toggle the sidebar |
 | `prefix y` / `Y` | copy a code block Claude wrote: pick one / the newest |
-| `prefix ,` | settings (theme, gap, mouse, echo, sidebar width, copy from apps) |
+| `prefix i` | paste the image on your clipboard (into Claude on another machine, alt+v does it too) |
+| `prefix ,` | settings (theme, gap, mouse, echo, sidebar width, copy from apps, sync redraws, cursor, paste images, paint edges) |
 | `prefix m` | toggle the mouse |
 | `prefix e` | toggle predictive echo |
 | `prefix q` | detach; everything keeps running |

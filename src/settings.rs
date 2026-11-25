@@ -15,8 +15,25 @@ pub struct Settings {
     /// Programs in panes (Claude Code, nvim) may set the clipboard with OSC 52;
     /// pass that on to the clipboard of the machine you are looking at.
     pub forward_clipboard: bool,
+    /// Hold a pane's output between a program's begin- and end-of-redraw marks
+    /// (synchronized output, DEC mode 2026) and show the redraw at once.
+    pub sync_redraws: bool,
+    /// How the cursor of the focused pane is shown: one of [`CURSORS`].
+    pub cursor: String,
+    /// alt+v / ctrl+v in a coding agent on another machine pastes the image on
+    /// this computer's clipboard (sent over as a file).
+    pub paste_images: bool,
+    /// Give your terminal the theme's background too, so the strip around the
+    /// cells (padding, scrollbar, part of a row) doesn't stand out.
+    pub paint_edges: bool,
     other: Map<String, Value>,
 }
+
+/// `steady`: shown once it has stayed put for a moment, so programs redrawing
+/// around it (Claude Code while thinking) don't make it jump and blink.
+/// `instant`: wherever the program has it right now. `off in agents`: hidden
+/// in coding-agent panes, which draw their own caret; steady elsewhere.
+pub const CURSORS: [&str; 3] = ["steady", "instant", "off in agents"];
 
 pub const GAPS: [u16; 3] = [0, 1, 2];
 pub const SIDEBAR_MIN: u16 = 24;
@@ -31,6 +48,10 @@ impl Default for Settings {
             predict: true,
             sidebar_width: 32,
             forward_clipboard: true,
+            sync_redraws: true,
+            cursor: CURSORS[0].into(),
+            paste_images: true,
+            paint_edges: true,
             other: Map::new(),
         }
     }
@@ -60,6 +81,19 @@ impl Settings {
             forward_clipboard: take("forward_clipboard")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(d.forward_clipboard),
+            sync_redraws: take("sync_redraws")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(d.sync_redraws),
+            cursor: take("cursor")
+                .and_then(|v| v.as_str().map(str::to_string))
+                .filter(|c| CURSORS.contains(&c.as_str()))
+                .unwrap_or(d.cursor),
+            paste_images: take("paste_images")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(d.paste_images),
+            paint_edges: take("paint_edges")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(d.paint_edges),
             other,
         }
     }
@@ -72,6 +106,10 @@ impl Settings {
         m.insert("predict".into(), json!(self.predict));
         m.insert("sidebar_width".into(), json!(self.sidebar_width));
         m.insert("forward_clipboard".into(), json!(self.forward_clipboard));
+        m.insert("sync_redraws".into(), json!(self.sync_redraws));
+        m.insert("cursor".into(), json!(self.cursor));
+        m.insert("paste_images".into(), json!(self.paste_images));
+        m.insert("paint_edges".into(), json!(self.paint_edges));
         Value::Object(m)
     }
 
