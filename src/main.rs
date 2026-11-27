@@ -290,7 +290,7 @@ fn list() -> Result<()> {
                 };
                 println!("    {name}: {}", terms.join(", "));
             }
-            app::Row::Pane(..) => {}
+            app::Row::Pane(..) | app::Row::Gap | app::Row::Rule => {}
             app::Row::LooseHeader => println!("  (unplaced)"),
             app::Row::Loose(i) => {
                 let x = &app.terms[*i];

@@ -231,7 +231,10 @@ pub const HELP: &[(&str, &str)] = &[
     ("prefix n / p", "next / previous tab"),
     ("prefix 1..9", "jump to tab 1-9"),
     ("prefix T / X", "rename / close tab"),
-    ("prefix N / W / D", "new / rename / close workspace"),
+    (
+        "prefix N / W / D",
+        "new (tab: machine) / rename / close workspace",
+    ),
     ("prefix w", "workspace navigation (sidebar)"),
     ("prefix g", "goto picker  (/ search, b w i d a filter)"),
     ("prefix a", "jump to the next agent waiting for you"),

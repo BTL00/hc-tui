@@ -55,7 +55,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     match &app.mode {
         Mode::Help => draw_help(f, f.area()),
         Mode::Picker { .. } => draw_picker(f, app, f.area()),
-        Mode::Prompt(kind, text) => draw_prompt(f, kind, text, f.area()),
+        Mode::Prompt(kind, text) => draw_prompt(f, app, kind, text, f.area()),
         Mode::Confirm(what) => draw_confirm(f, app, what, f.area()),
         Mode::Settings { cursor } => draw_settings(f, app, *cursor, f.area()),
         Mode::Copy { items, cursor } => draw_copy(f, app, items, *cursor, f.area()),
@@ -149,6 +149,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let current = app.current.clone();
     let focused = app.focused();
     let mut selected = None;
+    let mut current_row = None;
     let items: Vec<ListItem> = app
         .rows
         .iter()
@@ -214,6 +215,9 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 let is_current = current
                     .as_ref()
                     .is_some_and(|c| c.on == s.on && c.space == s.id && c.tab == t.id);
+                if is_current {
+                    current_row = Some(row_i);
+                }
                 if navigating && row_i == app.nav_cursor {
                     selected = Some(row_i);
                 }
@@ -287,6 +291,9 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                     .as_ref()
                     .is_some_and(|c| c.on == s.on && c.space == s.id && c.tab == t.id);
                 let is_focused = is_current && focused.as_ref() == Some(address);
+                if is_focused {
+                    current_row = Some(row_i);
+                }
                 if navigating && row_i == app.nav_cursor {
                     selected = Some(row_i);
                 }
@@ -330,6 +337,20 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                     item
                 }
             }
+            Row::Gap => ListItem::new(""),
+            // A thin line over each machine; the first carries the navigation keys.
+            Row::Rule => {
+                let hint = if navigating && row_i == 0 {
+                    "─ j/k ←→ enter esc "
+                } else {
+                    ""
+                };
+                let rest = inner_w.saturating_sub(hint.chars().count());
+                ListItem::new(Line::from(Span::styled(
+                    format!("{hint}{}", "─".repeat(rest)),
+                    Style::new().fg(if navigating { th().yellow } else { th().bg2 }),
+                )))
+            }
             Row::LooseHeader => ListItem::new(Line::from(Span::styled(
                 " unplaced · enter adds a tab",
                 Style::new().fg(th().dim).add_modifier(Modifier::ITALIC),
@@ -364,24 +385,22 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
             }
         })
         .collect();
-    let title = if navigating {
-        " workspaces · j/k ←→ enter esc "
-    } else {
-        " hc-tui "
-    };
     let block = Block::default()
         .borders(Borders::RIGHT)
         .border_style(Style::new().fg(if navigating { th().yellow } else { th().bg2 }))
-        .title(Span::styled(
-            title,
-            Style::new().fg(if navigating { th().yellow } else { th().dim }),
-        ))
         .style(Style::new().bg(th().bg));
     let inner = block.inner(area);
     let list = List::new(items)
         .block(block)
         .highlight_style(Style::new().bg(th().bg2).add_modifier(Modifier::BOLD));
     let mut state = ListState::default().with_selected(selected);
+    // A tree taller than the sidebar: keep the tab you are in on screen.
+    let height = inner.height as usize;
+    if let (None, Some(at)) = (selected, current_row)
+        && at >= height
+    {
+        *state.offset_mut() = (at + 1 - height).min(app.rows.len().saturating_sub(height));
+    }
     f.render_stateful_widget(list, area, &mut state);
     app.sidebar_view.set((inner, state.offset()));
     let mut notes: Vec<String> = app
@@ -781,7 +800,10 @@ fn popup(title: &str) -> Block<'_> {
 }
 
 fn draw_help(f: &mut Frame, area: Rect) {
-    let rect = centered(area, 66, HELP.len() as u16 + 2);
+    // Wide enough for the longest line: key column, description, borders.
+    let longest = HELP.iter().map(|(_, d)| d.chars().count()).max();
+    let width = 19 + longest.unwrap_or(0) as u16 + 3;
+    let rect = centered(area, width.max(66), HELP.len() as u16 + 2);
     let lines: Vec<Line> = HELP
         .iter()
         .map(|(k, d)| {
@@ -884,15 +906,29 @@ fn draw_picker(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn draw_prompt(f: &mut Frame, kind: &Prompt, text: &str, area: Rect) {
+fn draw_prompt(f: &mut Frame, app: &App, kind: &Prompt, text: &str, area: Rect) {
     let title = match kind {
         Prompt::RenameTab => "rename tab",
-        Prompt::NewWorkspace => "new workspace name",
+        Prompt::NewWorkspace(_) => "new workspace name",
         Prompt::RenameWorkspace => "rename workspace",
     };
-    let rect = centered(area, 56, 3);
+    let mut lines = vec![Line::from(format!("{text}▏"))];
+    // With more than one machine: where it will be made.
+    if let Prompt::NewWorkspace(on) = kind
+        && app.workspace_machines().len() > 1
+    {
+        lines.push(Line::from(vec![
+            Span::styled("on ", Style::new().fg(th().dim)),
+            Span::styled(
+                format!("‹ {} ›", app.machine_name(on)),
+                Style::new().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  tab: another machine", Style::new().fg(th().dim)),
+        ]));
+    }
+    let rect = centered(area, 56, lines.len() as u16 + 2);
     f.render_widget(Clear, rect);
-    f.render_widget(Paragraph::new(format!("{text}▏")).block(popup(title)), rect);
+    f.render_widget(Paragraph::new(lines).block(popup(title)), rect);
 }
 
 fn draw_confirm(f: &mut Frame, app: &App, what: &Confirm, area: Rect) {

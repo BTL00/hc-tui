@@ -199,6 +199,10 @@ pub enum Row {
     Pane(usize, usize, usize),
     LooseHeader,
     Loose(usize),
+    /// An empty line between groups.
+    Gap,
+    /// A thin line over a machine.
+    Rule,
 }
 
 /// Text being (or just) selected with the mouse inside one pane; cells are
@@ -335,7 +339,8 @@ impl Pane {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Prompt {
     RenameTab,
-    NewWorkspace,
+    /// The machine it will be made on (None: this one).
+    NewWorkspace(Option<String>),
     RenameWorkspace,
 }
 
@@ -728,8 +733,15 @@ impl App {
                     .map(|(_, s)| s.clone())
                     .unwrap_or_default(),
             };
+            if !rows.is_empty() {
+                rows.push(Row::Gap);
+            }
+            rows.push(Row::Rule);
             rows.push(Row::Machine(self.machine_name(&on), state));
             for (si, s) in self.spaces.iter().enumerate().filter(|(_, s)| s.on == on) {
+                if !matches!(rows.last(), Some(Row::Machine(..))) {
+                    rows.push(Row::Gap);
+                }
                 rows.push(Row::Space(si));
                 for (ti, t) in s.tabs.iter().enumerate() {
                     rows.push(Row::Tab(si, ti));
@@ -740,6 +752,7 @@ impl App {
             }
         }
         if !self.loose.is_empty() {
+            rows.push(Row::Gap);
             rows.push(Row::LooseHeader);
             rows.extend(self.loose.iter().map(|&i| Row::Loose(i)));
         }
@@ -1813,7 +1826,11 @@ grep -F -e '"type":"assistant"' -e '"type":"user"' "$pick" | grep -vF -e '"tool_
                     self.mode = Mode::Confirm(Confirm::CloseTab(c));
                 }
             }
-            NewWorkspace => self.mode = Mode::Prompt(Prompt::NewWorkspace, String::new()),
+            NewWorkspace => {
+                // Starts on the machine you are looking at; tab picks another.
+                let on = self.current.as_ref().and_then(|c| c.on.clone());
+                self.mode = Mode::Prompt(Prompt::NewWorkspace(on), String::new());
+            }
             RenameWorkspace => {
                 let name = self
                     .current_tab()
@@ -2042,7 +2059,7 @@ grep -F -e '"type":"assistant"' -e '"type":"user"' "$pick" | grep -vF -e '"tool_
     fn new_tab(&mut self) {
         let Some(c) = self.current.clone() else {
             // No layout yet: a first workspace.
-            self.new_workspace("main".into());
+            self.new_workspace("main".into(), None);
             return;
         };
         let folder = self.current_tab().map(|(s, _)| s.folder.clone());
@@ -2073,13 +2090,30 @@ grep -F -e '"type":"assistant"' -e '"type":"user"' "$pick" | grep -vF -e '"tool_
         }
     }
 
-    fn new_workspace(&mut self, name: String) {
-        let on = self.current.as_ref().and_then(|c| c.on.clone());
-        let cwd = self.focused_cwd().or_else(|| {
+    /// Machines a workspace can be made on: this one, then the connected ones.
+    pub fn workspace_machines(&self) -> Vec<Option<String>> {
+        let mut all = vec![None];
+        all.extend(
+            self.machines
+                .iter()
+                .filter(|(_, s)| s == "connected")
+                .map(|(n, _)| Some(n.clone())),
+        );
+        all
+    }
+
+    fn new_workspace(&mut self, name: String, on: Option<String>) {
+        // The focused pane's folder only means something on its own machine.
+        let here = self.current.as_ref().is_some_and(|c| c.on == on);
+        let home = || {
             std::env::var("USERPROFILE")
                 .or_else(|_| std::env::var("HOME"))
                 .ok()
-        });
+        };
+        let cwd = self
+            .focused_cwd()
+            .filter(|_| here)
+            .or_else(|| on.is_none().then(home).flatten());
         let Some(id) = self.spawn_shell(&on, cwd.clone()) else {
             return;
         };
@@ -2525,6 +2559,20 @@ grep -F -e '"type":"assistant"' -e '"type":"user"' "$pick" | grep -vF -e '"tool_
     }
 
     fn prompt_key(&mut self, kind: Prompt, mut text: String, key: Key) {
+        if let (Prompt::NewWorkspace(on), Key::Tab | Key::Down | Key::BackTab | Key::Up) =
+            (&kind, key)
+        {
+            let all = self.workspace_machines();
+            let at = all.iter().position(|m| m == on).unwrap_or(0);
+            let step = if matches!(key, Key::Tab | Key::Down) {
+                1
+            } else {
+                all.len() - 1
+            };
+            let next = all[(at + step) % all.len()].clone();
+            self.mode = Mode::Prompt(Prompt::NewWorkspace(next), text);
+            return;
+        }
         match key {
             Key::Esc | Key::Ctrl('[') | Key::Ctrl('c') => self.mode = Mode::Normal,
             Key::Enter => {
@@ -2563,9 +2611,9 @@ grep -F -e '"type":"assistant"' -e '"type":"user"' "$pick" | grep -vF -e '"tool_
                     None => false,
                 });
             }
-            Prompt::NewWorkspace => {
+            Prompt::NewWorkspace(on) => {
                 if !text.is_empty() {
-                    self.new_workspace(text);
+                    self.new_workspace(text, on);
                 }
             }
             Prompt::RenameWorkspace => {

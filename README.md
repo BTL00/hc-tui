@@ -157,7 +157,7 @@ hc-tui --no-mouse           # mouse off (select text natively)
 | `prefix r` | resize mode: `h/j/k/l`, any other key leaves |
 | `prefix n` / `p` / `1..9` | next / previous / nth tab |
 | `prefix T` / `X` | rename / close tab |
-| `prefix N` / `W` / `D` | new / rename / close workspace |
+| `prefix N` / `W` / `D` | new / rename / close workspace. New: made on the machine you are on; Tab picks another |
 | `prefix w` | workspace navigation: `j/k`, `←/→` between workspaces, Enter, Esc |
 | `prefix g` | goto picker: `/` search, `b w i d a` filters, Enter |
 | `prefix a` | jump to the next agent waiting for you |

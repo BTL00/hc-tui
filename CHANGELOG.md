@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Choose the machine for a new workspace.** `prefix N` shows the machine the workspace will be made on:
+  the one you are on by default, Tab / Shift+Tab (or ↓ / ↑) picks another connected machine.
+- **Calmer sidebar.** An empty line between workspaces, a thin line over each machine, and no `hc-tui`
+  header.
+- The sidebar keeps the tab you are in on screen when the tree is taller than the window.
+- The help popup (`prefix ?`) is wide enough for its longest line; some lines were cut off.
+
 ## 1.0.2
 
 - **No more blinking cursor in Claude Code panes.** While Claude works, it redraws its screen about ten
