@@ -249,6 +249,8 @@ pub struct Pane {
 /// Synchronized output (DEC mode 2026): programs wrap a redraw in these.
 const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
 const SYNC_END: &[u8] = b"\x1b[?2026l";
+/// Typing after this long says again that this window uses the pane.
+const FOCUS_AGAIN: Duration = Duration::from_secs(2);
 /// A redraw that hasn't ended by then is shown anyway, like terminals do.
 pub const SYNC_MAX: Duration = Duration::from_millis(150);
 const HELD_MAX: usize = 1 << 20;
@@ -435,6 +437,8 @@ pub struct App {
     pub cursor_track: std::cell::Cell<CursorTrack>,
     /// When you last typed into a pane; the cursor follows at once then.
     pub last_typed: Option<Instant>,
+    /// The pane (its channel) this window last told the core it uses, and when.
+    focus_claim: Option<(u32, Instant)>,
 }
 
 /// A cursor position is shown once it has held this long (cursor: steady).
@@ -502,6 +506,7 @@ impl App {
                 shown: None,
             }),
             last_typed: None,
+            focus_claim: None,
         }
     }
 
@@ -859,11 +864,29 @@ impl App {
         }
         if let Some(f) = self.focused() {
             self.attention.remove(&f);
-            if let Some(p) = self.panes.get(&f)
-                && p.ended.is_none()
-            {
-                self.conn.send(p.channel, hc::FOCUS, &[1]);
+            self.claim_focus(&f, false);
+        }
+    }
+
+    /// Tells the core this window is the one using `address`; the core then gives
+    /// the terminal this window's size. Said when the focus changes, and again when
+    /// you type after a pause. Not on every refresh: two windows showing one
+    /// terminal at different sizes would keep taking it from each other, and its
+    /// program would redraw each time.
+    fn claim_focus(&mut self, address: &str, typing: bool) {
+        let Some(p) = self.panes.get(address).filter(|p| p.ended.is_none()) else {
+            return;
+        };
+        let now = Instant::now();
+        let again = match self.focus_claim {
+            Some((channel, at)) if channel == p.channel => {
+                typing && now.duration_since(at) > FOCUS_AGAIN
             }
+            _ => true,
+        };
+        if again {
+            self.conn.send(p.channel, hc::FOCUS, &[1]);
+            self.focus_claim = Some((p.channel, now));
         }
     }
 
@@ -994,6 +1017,7 @@ impl App {
             return;
         }
         let Some(f) = self.focused() else { return };
+        self.claim_focus(&f, true);
         // ctrl+enter / shift+enter: as `CSI u` for a program that asked for such
         // keys (or a coding agent, which reads them), else what terminals
         // always sent: a line feed / a plain enter.

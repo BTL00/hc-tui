@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.3
 
 - **Choose the machine for a new workspace.** `prefix N` shows the machine the workspace will be made on:
   the one you are on by default, Tab / Shift+Tab (or ↓ / ↑) picks another connected machine.
@@ -8,6 +8,10 @@
   header.
 - The sidebar keeps the tab you are in on screen when the tree is taller than the window.
 - The help popup (`prefix ?`) is wide enough for its longest line; some lines were cut off.
+- **Two windows on one terminal no longer fight over its size.** hc-tui told the core "this window uses
+  the pane" on every refresh, so with the same pane open in two windows of different sizes (PC and
+  laptop) the terminal was resized back and forth and its program redrew each time (blinking). It now
+  says so when the focus changes, and again when you type there after a pause.
 
 ## 1.0.2
 
